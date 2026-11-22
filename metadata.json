@@ -1,0 +1,6 @@
+{
+  "name": "GitHub Release Tracker",
+  "description": "Tracks the latest release of GitHub projects with configurable Source and Target platform columns (PC, Android, Switch, Switch 2, PS5, PS4, PS3).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
