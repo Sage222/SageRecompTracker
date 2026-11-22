@@ -912,6 +912,17 @@ export default function App() {
     setStatusMsg(`Downloading github-release-tracker-pyqt6-v${APP_VERSION}.zip ...`);
   };
 
+  // Download single portable .py file directly
+  const handleDownloadPy = () => {
+    const a = document.createElement('a');
+    a.href = '/api/download-py';
+    a.download = 'github_release_tracker.py';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setStatusMsg('Downloading portable single-file github_release_tracker.py ...');
+  };
+
   // Download single file from rustFiles
   const handleDownloadSingleFile = (filename: string, content: string) => {
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
@@ -2127,11 +2138,10 @@ export default function App() {
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <div className="text-[14px] font-bold">
-                          Python + PyQt6 Portable Executable Builder (`dist\GitHubReleaseTracker.exe`)
+                          Portable Single-File PyQt6 App (`github_release_tracker.py`) &amp; EXE Builder
                         </div>
                         <div style={{ color: pal.sub_fg }} className="text-[12px] mt-0.5">
-                          Includes configurable Source &amp; Target QComboBox columns (PC, Android, Switch,
-                          Switch 2, PS5, PS4, PS3) and 1-click PyInstaller single-file `.exe` packaging.
+                          100% self-contained in a single `.py` file. Automatically creates `projects.json` &amp; `icon.ico` next to `github_release_tracker.py` in its own directory.
                         </div>
                       </div>
 
@@ -2149,11 +2159,11 @@ export default function App() {
                           className="px-3 rounded-[4px] border text-[12px] inline-flex items-center gap-1.5 cursor-pointer"
                         >
                           <RefreshCw size={12} className={builderRunning ? 'animate-spin' : ''} />
-                          <span>Run Python Tests &amp; Package</span>
+                          <span>Run Python Tests</span>
                         </button>
                         <button
                           type="button"
-                          onClick={handleDownloadZip}
+                          onClick={handleDownloadPy}
                           style={{
                             backgroundColor: pal.sel_bg,
                             color: pal.sel_fg,
@@ -2163,50 +2173,26 @@ export default function App() {
                           className="px-3 rounded-[4px] border text-[12px] font-medium inline-flex items-center gap-1.5 cursor-pointer"
                         >
                           <Download size={13} />
-                          <span>Download PyQt6 Project &amp; EXE Builder (.zip)</span>
+                          <span>Download Portable Single .py (`github_release_tracker.py`)</span>
                         </button>
                       </div>
                     </div>
 
                     {/* Quick script download buttons */}
                     <div className="flex flex-wrap items-center gap-2">
-                      {rustFiles['github_release_tracker.py'] && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleDownloadSingleFile(
-                              'github_release_tracker.py',
-                              rustFiles['github_release_tracker.py']
-                            )
-                          }
-                          style={{
-                            backgroundColor: pal.btn_bg,
-                            color: pal.fg,
-                            borderColor: pal.border,
-                            height: 26,
-                          }}
-                          className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
-                        >
-                          Download github_release_tracker.py
-                        </button>
-                      )}
-                      {rustFiles['tracker_core.py'] && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleDownloadSingleFile('tracker_core.py', rustFiles['tracker_core.py'])
-                          }
-                          style={{
-                            backgroundColor: pal.btn_bg,
-                            color: pal.fg,
-                            borderColor: pal.border,
-                            height: 26,
-                          }}
-                          className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
-                        >
-                          Download tracker_core.py
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={handleDownloadZip}
+                        style={{
+                          backgroundColor: pal.btn_bg,
+                          color: pal.fg,
+                          borderColor: pal.border,
+                          height: 26,
+                        }}
+                        className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
+                      >
+                        Download Full EXE Builder Bundle (.zip)
+                      </button>
                       {rustFiles['build.bat'] && (
                         <button
                           type="button"

@@ -36,8 +36,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/4] Running the Python unit tests ^(test_tracker.py^) ...
-python -m unittest test_tracker.py -v
+echo [2/4] Running built-in Python unit tests ^(github_release_tracker.py --test^) ...
+python github_release_tracker.py --test
 if errorlevel 1 (
     echo [X] Unit tests failed. Not building.
     goto :fail

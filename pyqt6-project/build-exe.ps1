@@ -39,8 +39,8 @@ $venvPyInstaller = ".\.venv\Scripts\pyinstaller.exe"
 
 if (-not $SkipTests) {
     Write-Host ""
-    Write-Host "[2/4] Running Python unit tests (test_tracker.py) ..." -ForegroundColor Cyan
-    & $venvPy -m unittest test_tracker.py -v
+    Write-Host "[2/4] Running built-in Python unit tests (github_release_tracker.py --test) ..." -ForegroundColor Cyan
+    & $venvPy github_release_tracker.py --test
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[X] Unit tests failed. Aborting build." -ForegroundColor Red
         exit 1

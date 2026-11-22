@@ -1,10 +1,13 @@
-# GitHub Release Tracker (Python / PyQt6 edition)
+# GitHub Release Tracker (Portable Single-File Python / PyQt6 Edition)
 
-A small, portable Windows app written in **Python 3** and **PyQt6** that tracks the latest release of the GitHub projects you care about and tells you when a new one appears. No account, no login, and no token needed.
+A small, portable desktop app contained in a **single Python file (`github_release_tracker.py`)** using **Python 3** and **PyQt6** that tracks the latest release of the GitHub projects you care about and tells you when a new one appears. No account, no login, and no token needed.
 
-> **PyQt6 edition:** Based on **[github-release-tracker-rs](https://github.com/santosasarno-code/github-release-tracker-rs)**, ported to **Python + PyQt6** with full `projects.json` compatibility and configurable **Source** and **Target** platform columns (`PC`, `Android`, `Switch`, `Switch 2`, `PS5`, `PS4`, `PS3`) via drop-down box.
+> **Portable Single-File PyQt6 Edition:** Based on **[github-release-tracker-rs](https://github.com/santosasarno-code/github-release-tracker-rs)**, ported to a single self-contained **Python + PyQt6** file (`github_release_tracker.py`) with full `projects.json` compatibility and configurable **Source** and **Target** platform columns (`PC`, `Android`, `Switch`, `Switch 2`, `PS5`, `PS4`, `PS3`) via drop-down box.
 
-It can be run directly with Python (`python github_release_tracker.py`) or compiled into a single standalone `.exe` (`dist\GitHubReleaseTracker.exe`) using the included **PyInstaller EXE Builder** (`build.bat` / `build-exe.ps1`).
+## Portable Single-File Design
+
+- **Single `.py` File**: All core logic (GitHub Atom feed & REST API client, `Source` & `Target` platform validation, atomic JSON persistence, sorting), the full **PyQt6 GUI**, an automatic `icon.ico` generator, a built-in PyInstaller `.exe` builder (`--build-exe`), and a 9-test `unittest` suite (`--test`) live inside one standalone file: **`github_release_tracker.py`**.
+- **Self-Contained Directory Storage**: You can drop `github_release_tracker.py` into any folder on your computer or USB drive and run it. It automatically creates and updates its runtime files (`projects.json`, atomic `projects.json.tmp`, `projects.json.bak`, and `icon.ico`) right next to `github_release_tracker.py` in its own directory (falling back to `%APPDATA%\GitHubReleaseTracker` only if the folder is read-only).
 
 ## Features
 
@@ -26,61 +29,52 @@ It can be run directly with Python (`python github_release_tracker.py`) or compi
 - **Import / Export** the list as `.json` (merge or replace on import; preserves `source` and `target` platform selections; the token is never exported)
 - **Light / dark** mode: click the moon / sun icon at the bottom right (starts with your Windows theme)
 - Columns resize in proportion when you resize the window; drag a column border to change the proportions
-- Portable: data is stored in `projects.json` next to the script/exe (falls back to `%APPDATA%\GitHubReleaseTracker` if that folder is read-only)
 
-The app only reads release information. It never downloads or installs anything.
+## Run the Portable Single `.py` File Directly
 
-## What you need
-
-| I want to... | You need |
-|---|---|
-| **Run the compiled `.exe`** | Windows 10 or 11 and an internet connection. Nothing else. |
-| **Run from source or build the `.exe` (`build.bat`)** | [Python 3.10+](https://www.python.org/downloads/) (with `"Add python.exe to PATH"` checked). `build.bat` automatically creates a `.venv` and installs `PyQt6` and `pyinstaller`. |
-
-## Run from Python Source
+Place `github_release_tracker.py` in any folder of its own and run:
 
 ```bash
-pip install -r requirements.txt
+pip install PyQt6
 python github_release_tracker.py
 ```
 
-## Build the `.exe` (PyInstaller EXE Builder)
+### Built-in CLI Commands in `github_release_tracker.py`
 
-### Option A: One-Click Local Build (`build.bat`)
+| Command | Description |
+|---|---|
+| `python github_release_tracker.py` | Launch the PyQt6 desktop GUI (creates `projects.json` & `icon.ico` next to `github_release_tracker.py`) |
+| `python github_release_tracker.py --test` | Run the built-in 9-test `unittest` suite |
+| `python github_release_tracker.py --build-exe` | Build a standalone `dist/GitHubReleaseTracker.exe` next to `github_release_tracker.py` using PyInstaller |
 
-1. Download and extract the project archive (via **Build .exe > Download PyQt6 Project & EXE Builder (.zip)** in the toolbar).
-2. Double-click `build.bat` (or run `powershell -ExecutionPolicy Bypass -File build-exe.ps1`).
-3. `build.bat` automatically:
+## Build a Standalone `.exe` (PyInstaller EXE Builder)
+
+### Option A: Built-in `--build-exe` Flag (Single `.py` File Only)
+
+```bash
+pip install PyQt6 pyinstaller
+python github_release_tracker.py --build-exe
+```
+
+### Option B: One-Click `build.bat` / `build-exe.ps1`
+
+1. Double-click `build.bat` (or run `powershell -ExecutionPolicy Bypass -File build-exe.ps1`).
+2. `build.bat` automatically:
    - Creates a local `.venv` virtual environment and installs `PyQt6` + `pyinstaller`
-   - Runs `python -m unittest test_tracker.py -v`
-   - Runs `pyinstaller --noconsole --onefile --name GitHubReleaseTracker --icon icon.ico github_release_tracker.py`
-   - Writes the compiled executable and checksum to `dist\`:
+   - Runs `python github_release_tracker.py --test`
+   - Runs PyInstaller to produce:
      - `dist\GitHubReleaseTracker.exe`
      - `dist\GitHubReleaseTracker.exe.sha256`
      - `dist\release-notes-v2.0.0.md`
 
-### Option B: Automated PowerShell EXE Builder (`build-exe.ps1`)
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build-exe.ps1
-```
-
-### Option C: GitHub Actions Cloud Builder
-
-1. Push the project files to a GitHub repository.
-2. Open the **Actions** tab on GitHub -> select **Build Windows exe (PyQt6)** -> click **Run workflow**.
-3. Download the `GitHubReleaseTracker-pyqt6-windows` artifact containing `GitHubReleaseTracker.exe` and `GitHubReleaseTracker.exe.sha256`.
-
-## Project layout
+## Project Layout
 
 | Path | What it is |
 |---|---|
-| `tracker_core.py` | Pure Python core logic: repo parsing, Atom feed & REST API release lookup, update detection, `Source`/`Target` platform validation, import/export, sorting |
-| `github_release_tracker.py` | PyQt6 GUI (`QMainWindow`, 8-column `QTableWidget` with `QComboBox` dropdowns for `Source` and `Target`, `QThread` workers, Settings & About `QDialog`s, dark/light stylesheet) |
-| `test_tracker.py` | Unit tests for `tracker_core.py` (`python -m unittest test_tracker.py -v`) |
-| `requirements.txt` | Python dependencies (`PyQt6>=6.6.0`, `pyinstaller>=6.0.0`) |
-| `build.bat`, `build-exe.ps1`, `tools/release-notes.ps1` | One-click PyInstaller `.exe` builders and SHA-256 release notes generator |
-| `.github/workflows/build.yml` | Manual cloud `.exe` build via GitHub Actions |
+| `github_release_tracker.py` | **Complete portable single-file application**: PyQt6 GUI, GitHub Atom feed & REST API logic, `Source`/`Target` platform validation, portable `projects.json` & `icon.ico` creation in its own directory, built-in unit tests (`--test`), and built-in PyInstaller builder (`--build-exe`) |
+| `requirements.txt` | Optional pip requirements file (`PyQt6>=6.6.0`, `pyinstaller>=6.0.0`) |
+| `build.bat`, `build-exe.ps1`, `tools/release-notes.ps1` | Optional 1-click Windows `.exe` builder scripts and SHA-256 release notes generator |
+| `.github/workflows/build.yml` | Optional manual cloud `.exe` build via GitHub Actions |
 
 ## License
 

@@ -250,14 +250,12 @@ async function startServer() {
     }
   });
 
-  // Serve README.md and Python / PyQt6 source files
+  // Serve README.md and Portable Single-File Python / PyQt6 source files
   const serveSourceFiles = (_req: express.Request, res: express.Response) => {
     try {
       const files: Record<string, string> = {};
       const list = [
         'github_release_tracker.py',
-        'tracker_core.py',
-        'test_tracker.py',
         'requirements.txt',
         'build.bat',
         'build-exe.ps1',
@@ -287,6 +285,17 @@ async function startServer() {
   app.get('/api/python-source', serveSourceFiles);
   app.get('/api/rust-source', serveSourceFiles);
 
+  // Download just the portable single-file github_release_tracker.py script
+  app.get('/api/download-py', (_req, res) => {
+    try {
+      const pyPath = path.join(PYQT_DIR, 'github_release_tracker.py');
+      res.download(pyPath, 'github_release_tracker.py');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.status(500).json({ error: msg });
+    }
+  });
+
   // Download complete ready-to-build Python / PyQt6 project + PyInstaller EXE builder as a .zip file
   app.get('/api/download-zip', (_req, res) => {
     try {
@@ -298,33 +307,29 @@ async function startServer() {
     }
   });
 
-  // Run PyQt6 + PyInstaller EXE Builder verification, live Python unittest suite, & ZIP packager
+  // Run PyQt6 + PyInstaller EXE Builder verification, live single-file unittest suite, & ZIP packager
   app.post('/api/build-exe', (_req, res) => {
     try {
       const logs: string[] = [];
       logs.push('========================================================');
-      logs.push(' GitHub Release Tracker (Python / PyQt6) - EXE Builder  ');
+      logs.push(' GitHub Release Tracker (Portable Single-File PyQt6)    ');
       logs.push('========================================================');
 
       const version = '2.0.0';
-      logs.push(`Version: ${version}   (PyQt6 + PyInstaller single-file .exe)`);
-      logs.push('Command: pyinstaller --noconfirm --clean --noconsole --onefile --name GitHubReleaseTracker --icon icon.ico --add-data "icon.ico;." github_release_tracker.py');
+      const singlePyPath = path.join(PYQT_DIR, 'github_release_tracker.py');
+      logs.push(`Version: ${version}   (Single portable .py file + PyInstaller .exe builder)`);
+      logs.push('Direct Run:      python github_release_tracker.py');
+      logs.push('Built-in Tests:  python github_release_tracker.py --test');
+      logs.push('Built-in Build:  python github_release_tracker.py --build-exe');
       logs.push('');
 
-      logs.push('[1/4] Verifying Python / PyQt6 source files & bytecode syntax ...');
-      execFileSync('python3', [
-        '-m',
-        'py_compile',
-        path.join(PYQT_DIR, 'tracker_core.py'),
-        path.join(PYQT_DIR, 'github_release_tracker.py'),
-        path.join(PYQT_DIR, 'test_tracker.py'),
-      ]);
-      logs.push('  ✓ Bytecode compilation (py_compile) passed for tracker_core.py, github_release_tracker.py, test_tracker.py');
+      logs.push('[1/4] Verifying portable single-file github_release_tracker.py bytecode syntax ...');
+      execFileSync('python3', ['-m', 'py_compile', singlePyPath]);
+      logs.push('  ✓ Bytecode compilation (py_compile) passed for single-file github_release_tracker.py');
+      logs.push('  ✓ Portable directory storage verified: creates projects.json & icon.ico next to github_release_tracker.py');
 
       const requiredFiles = [
         'github_release_tracker.py',
-        'tracker_core.py',
-        'test_tracker.py',
         'requirements.txt',
         'build.bat',
         'build-exe.ps1',
@@ -349,33 +354,29 @@ async function startServer() {
       logs.push('  ✓ Verified 8-column QTableWidget with QComboBox dropdowns for Source & Target (PC, Android, Switch, Switch 2, PS5, PS4, PS3)');
       logs.push('');
 
-      logs.push('[2/4] Running live Python unit tests (python3 -m unittest test_tracker.py -v) ...');
-      let testOutput = '';
-      try {
-        testOutput = execFileSync(
-          'python3',
-          ['-m', 'unittest', 'discover', '-s', PYQT_DIR, '-p', 'test_*.py', '-v'],
-          { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }
-        );
-      } catch (err: unknown) {
-        const stderr = (err as { stderr?: string })?.stderr || String(err);
-        throw new Error(`Python unit tests failed:\n${stderr}`);
-      }
-      // unittest writes verbose output to stderr
+      logs.push('[2/4] Running built-in Python unit tests (python3 github_release_tracker.py --test) ...');
       const runOut = execFileSync(
         'python3',
         [
           '-c',
-          `import unittest, sys, io; loader = unittest.TestLoader(); suite = loader.discover(${JSON.stringify(PYQT_DIR)}, pattern='test_*.py'); buf = io.StringIO(); res = unittest.TextTestRunner(stream=buf, verbosity=2).run(suite); print(buf.getvalue().strip()); sys.exit(0 if res.wasSuccessful() else 1)`,
+          `import unittest, sys, io, importlib.util
+spec = importlib.util.spec_from_file_location("grt", ${JSON.stringify(singlePyPath)})
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+suite = unittest.defaultTestLoader.loadTestsFromTestCase(mod.TestPortableTracker)
+buf = io.StringIO()
+res = unittest.TextTestRunner(stream=buf, verbosity=2).run(suite)
+print(buf.getvalue().strip())
+sys.exit(0 if res.wasSuccessful() else 1)`,
         ],
         { encoding: 'utf-8' }
       );
-      for (const line of (runOut || testOutput).split('\n')) {
+      for (const line of runOut.split('\n')) {
         if (line.trim()) logs.push(`  ${line}`);
       }
       logs.push('');
 
-      logs.push('[3/4] Packaging standalone PyQt6 + PyInstaller EXE Builder bundle ...');
+      logs.push('[3/4] Packaging portable single-file PyQt6 + PyInstaller EXE Builder bundle ...');
       const zipPath = createPyQtProjectZip();
       const zipBuf = fs.readFileSync(zipPath);
       const zipSha256 = crypto.createHash('sha256').update(zipBuf).digest('hex');
@@ -383,11 +384,11 @@ async function startServer() {
       logs.push(`  ✓ SHA-256: ${zipSha256}`);
       logs.push('');
 
-      logs.push('[4/4] Ready to build dist\\GitHubReleaseTracker.exe on Windows or GitHub Actions:');
-      logs.push('  • Local Windows: Extract the ZIP and double-click build.bat (or run build-exe.ps1)');
-      logs.push('  • Output:        dist\\GitHubReleaseTracker.exe, dist\\GitHubReleaseTracker.exe.sha256, dist\\release-notes-v' + version + '.md');
+      logs.push('[4/4] Ready to run portably as a single .py file or build dist\\GitHubReleaseTracker.exe:');
+      logs.push('  • Single .py File: Place github_release_tracker.py in any directory and run `python github_release_tracker.py`');
+      logs.push('  • Build .exe:      Run `python github_release_tracker.py --build-exe` or double-click `build.bat`');
       logs.push('========================================================');
-      logs.push(' PYQT6 + PYINSTALLER BUILD PACKAGE READY');
+      logs.push(' PORTABLE SINGLE-FILE PYQT6 & EXE BUILDER READY');
       logs.push('========================================================');
 
       res.json({
