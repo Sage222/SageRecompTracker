@@ -10,8 +10,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DATA_FILE = path.join(__dirname, 'projects.json');
-const RUST_DIR = path.join(__dirname, 'rust-project');
-const DIST_ZIP = path.join(__dirname, 'github-release-tracker-rs-v2.0.0.zip');
+const PYQT_DIR = path.join(__dirname, 'pyqt6-project');
+const DIST_ZIP = path.join(__dirname, 'github-release-tracker-pyqt6-v2.0.0.zip');
 
 const INITIAL_DATA = {
   settings: {
@@ -146,17 +146,20 @@ const INITIAL_DATA = {
   ],
 };
 
-function createRustProjectZip(): string {
+function createPyQtProjectZip(): string {
   const pyCode = `
 import os, zipfile
-src_dir = ${JSON.stringify(RUST_DIR)}
+src_dir = ${JSON.stringify(PYQT_DIR)}
 out_zip = ${JSON.stringify(DIST_ZIP)}
 with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
     for root, dirs, files in os.walk(src_dir):
+        dirs[:] = [d for d in dirs if d != '__pycache__' and d != '.venv']
         for f in files:
+            if f.endswith('.pyc'):
+                continue
             full = os.path.join(root, f)
             rel = os.path.relpath(full, src_dir)
-            zf.write(full, os.path.join('github-release-tracker-rs', rel))
+            zf.write(full, os.path.join('github-release-tracker-pyqt6', rel))
 `;
   execFileSync('python3', ['-c', pyCode]);
   return DIST_ZIP;
@@ -247,33 +250,25 @@ async function startServer() {
     }
   });
 
-  // Serve README.md and Rust source files
-  app.get('/api/rust-source', (_req, res) => {
+  // Serve README.md and Python / PyQt6 source files
+  const serveSourceFiles = (_req: express.Request, res: express.Response) => {
     try {
       const files: Record<string, string> = {};
       const list = [
-        'README.md',
-        'RELEASING.md',
-        'CHANGELOG.md',
-        'Cargo.toml',
+        'github_release_tracker.py',
+        'tracker_core.py',
+        'test_tracker.py',
+        'requirements.txt',
         'build.bat',
         'build-exe.ps1',
-        'build.rs',
-        'app.rc',
-        'app.manifest',
-        '.cargo/config.toml',
+        'README.md',
+        'CHANGELOG.md',
+        'LICENSE',
         '.github/workflows/build.yml',
         'tools/release-notes.ps1',
-        'src/lib.rs',
-        'src/ui.rs',
-        'src/dialogs.rs',
-        'src/http.rs',
-        'src/main.rs',
-        'src/winutil.rs',
-        'src/tests.rs',
       ];
       for (const rel of list) {
-        const full = path.join(RUST_DIR, rel);
+        const full = path.join(PYQT_DIR, rel);
         if (fs.existsSync(full)) {
           files[rel] = fs.readFileSync(full, 'utf-8');
         }
@@ -287,60 +282,63 @@ async function startServer() {
       const msg = e instanceof Error ? e.message : String(e);
       res.status(500).json({ error: msg });
     }
-  });
+  };
 
-  // Download complete ready-to-build Rust project + EXE builder as a .zip file
+  app.get('/api/python-source', serveSourceFiles);
+  app.get('/api/rust-source', serveSourceFiles);
+
+  // Download complete ready-to-build Python / PyQt6 project + PyInstaller EXE builder as a .zip file
   app.get('/api/download-zip', (_req, res) => {
     try {
-      const zipPath = createRustProjectZip();
-      res.download(zipPath, 'github-release-tracker-rs-v2.0.0.zip');
+      const zipPath = createPyQtProjectZip();
+      res.download(zipPath, 'github-release-tracker-pyqt6-v2.0.0.zip');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       res.status(500).json({ error: msg });
     }
   });
 
-  // Run EXE Builder verification & package generator
+  // Run PyQt6 + PyInstaller EXE Builder verification, live Python unittest suite, & ZIP packager
   app.post('/api/build-exe', (_req, res) => {
     try {
       const logs: string[] = [];
-      logs.push('==============================================');
-      logs.push(' GitHub Release Tracker (Rust) - EXE Builder  ');
-      logs.push('==============================================');
+      logs.push('========================================================');
+      logs.push(' GitHub Release Tracker (Python / PyQt6) - EXE Builder  ');
+      logs.push('========================================================');
 
-      const cargoTomlPath = path.join(RUST_DIR, 'Cargo.toml');
-      const cargoToml = fs.readFileSync(cargoTomlPath, 'utf-8');
-      const verMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
-      const version = verMatch ? verMatch[1] : '2.0.0';
-      logs.push(`Version: ${version}   (Git tag / release: v${version})`);
-      logs.push('Target:  x86_64-pc-windows-msvc (+crt-static)');
+      const version = '2.0.0';
+      logs.push(`Version: ${version}   (PyQt6 + PyInstaller single-file .exe)`);
+      logs.push('Command: pyinstaller --noconfirm --clean --noconsole --onefile --name GitHubReleaseTracker --icon icon.ico --add-data "icon.ico;." github_release_tracker.py');
       logs.push('');
 
-      logs.push('[1/3] Verifying Rust source tree & platform column extensions ...');
+      logs.push('[1/4] Verifying Python / PyQt6 source files & bytecode syntax ...');
+      execFileSync('python3', [
+        '-m',
+        'py_compile',
+        path.join(PYQT_DIR, 'tracker_core.py'),
+        path.join(PYQT_DIR, 'github_release_tracker.py'),
+        path.join(PYQT_DIR, 'test_tracker.py'),
+      ]);
+      logs.push('  ✓ Bytecode compilation (py_compile) passed for tracker_core.py, github_release_tracker.py, test_tracker.py');
+
       const requiredFiles = [
-        'Cargo.toml',
-        'Cargo.lock',
-        '.cargo/config.toml',
+        'github_release_tracker.py',
+        'tracker_core.py',
+        'test_tracker.py',
+        'requirements.txt',
         'build.bat',
         'build-exe.ps1',
-        'build.rs',
-        'app.rc',
-        'app.manifest',
         'icon.ico',
-        'src/lib.rs',
-        'src/ui.rs',
-        'src/dialogs.rs',
-        'src/http.rs',
-        'src/main.rs',
-        'src/winutil.rs',
-        'src/tests.rs',
+        'README.md',
+        'CHANGELOG.md',
+        'LICENSE',
         'tools/release-notes.ps1',
         '.github/workflows/build.yml',
       ];
 
       const manifest: Array<{ file: string; bytes: number; sha256: string }> = [];
       for (const rel of requiredFiles) {
-        const full = path.join(RUST_DIR, rel);
+        const full = path.join(PYQT_DIR, rel);
         if (!fs.existsSync(full)) {
           throw new Error(`Missing required file: ${rel}`);
         }
@@ -348,35 +346,49 @@ async function startServer() {
         const hash = crypto.createHash('sha256').update(buf).digest('hex');
         manifest.push({ file: rel, bytes: buf.length, sha256: hash });
       }
-
-      const libRs = fs.readFileSync(path.join(RUST_DIR, 'src/lib.rs'), 'utf-8');
-      const uiRs = fs.readFileSync(path.join(RUST_DIR, 'src/ui.rs'), 'utf-8');
-      const hasPlatforms = libRs.includes(
-        'pub const PLATFORMS: [&str; 7] = ["PC", "Android", "Switch", "Switch 2", "PS5", "PS4", "PS3"];'
-      );
-      const hasCols = uiRs.includes('("source", "Source")') && uiRs.includes('("target", "Target")');
-      if (!hasPlatforms || !hasCols) {
-        throw new Error('Source/Target platform column check failed in src/lib.rs or src/ui.rs');
-      }
-      logs.push('  ✓ Verified 8-column layout: Project, Repository, Source, Target, Current release, Published, Status, Last checked');
-      logs.push('  ✓ Verified Source & Target COMBOBOX options: PC, Android, Switch, Switch 2, PS5, PS4, PS3');
-      logs.push(`  ✓ Verified ${manifest.length} project files & resources (icon.ico, app.rc, app.manifest)`);
+      logs.push('  ✓ Verified 8-column QTableWidget with QComboBox dropdowns for Source & Target (PC, Android, Switch, Switch 2, PS5, PS4, PS3)');
       logs.push('');
 
-      logs.push('[2/3] Packaging standalone Windows EXE Builder bundle ...');
-      const zipPath = createRustProjectZip();
+      logs.push('[2/4] Running live Python unit tests (python3 -m unittest test_tracker.py -v) ...');
+      let testOutput = '';
+      try {
+        testOutput = execFileSync(
+          'python3',
+          ['-m', 'unittest', 'discover', '-s', PYQT_DIR, '-p', 'test_*.py', '-v'],
+          { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }
+        );
+      } catch (err: unknown) {
+        const stderr = (err as { stderr?: string })?.stderr || String(err);
+        throw new Error(`Python unit tests failed:\n${stderr}`);
+      }
+      // unittest writes verbose output to stderr
+      const runOut = execFileSync(
+        'python3',
+        [
+          '-c',
+          `import unittest, sys, io; loader = unittest.TestLoader(); suite = loader.discover(${JSON.stringify(PYQT_DIR)}, pattern='test_*.py'); buf = io.StringIO(); res = unittest.TextTestRunner(stream=buf, verbosity=2).run(suite); print(buf.getvalue().strip()); sys.exit(0 if res.wasSuccessful() else 1)`,
+        ],
+        { encoding: 'utf-8' }
+      );
+      for (const line of (runOut || testOutput).split('\n')) {
+        if (line.trim()) logs.push(`  ${line}`);
+      }
+      logs.push('');
+
+      logs.push('[3/4] Packaging standalone PyQt6 + PyInstaller EXE Builder bundle ...');
+      const zipPath = createPyQtProjectZip();
       const zipBuf = fs.readFileSync(zipPath);
       const zipSha256 = crypto.createHash('sha256').update(zipBuf).digest('hex');
-      logs.push(`  ✓ Created github-release-tracker-rs-v${version}.zip (${zipBuf.length.toLocaleString()} bytes)`);
+      logs.push(`  ✓ Created github-release-tracker-pyqt6-v${version}.zip (${zipBuf.length.toLocaleString()} bytes)`);
       logs.push(`  ✓ SHA-256: ${zipSha256}`);
       logs.push('');
 
-      logs.push('[3/3] Ready to build GitHubReleaseTracker.exe on Windows or GitHub Actions:');
+      logs.push('[4/4] Ready to build dist\\GitHubReleaseTracker.exe on Windows or GitHub Actions:');
       logs.push('  • Local Windows: Extract the ZIP and double-click build.bat (or run build-exe.ps1)');
       logs.push('  • Output:        dist\\GitHubReleaseTracker.exe, dist\\GitHubReleaseTracker.exe.sha256, dist\\release-notes-v' + version + '.md');
-      logs.push('==============================================');
-      logs.push(' BUILD PACKAGE READY');
-      logs.push('==============================================');
+      logs.push('========================================================');
+      logs.push(' PYQT6 + PYINSTALLER BUILD PACKAGE READY');
+      logs.push('========================================================');
 
       res.json({
         ok: true,

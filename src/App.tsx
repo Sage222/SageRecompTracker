@@ -185,7 +185,7 @@ export default function App() {
     manifest: Array<{ file: string; bytes: number; sha256: string }>;
   } | null>(null);
   const [rustFiles, setRustFiles] = useState<Record<string, string>>({});
-  const [selectedSourceFile, setSelectedSourceFile] = useState<string>('build.bat');
+  const [selectedSourceFile, setSelectedSourceFile] = useState<string>('github_release_tracker.py');
 
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -905,11 +905,11 @@ export default function App() {
   const handleDownloadZip = () => {
     const a = document.createElement('a');
     a.href = '/api/download-zip';
-    a.download = `github-release-tracker-rs-v${APP_VERSION}.zip`;
+    a.download = `github-release-tracker-pyqt6-v${APP_VERSION}.zip`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setStatusMsg(`Downloading github-release-tracker-rs-v${APP_VERSION}.zip ...`);
+    setStatusMsg(`Downloading github-release-tracker-pyqt6-v${APP_VERSION}.zip ...`);
   };
 
   // Download single file from rustFiles
@@ -932,13 +932,13 @@ export default function App() {
     try {
       const [buildRes, srcRes] = await Promise.all([
         fetch('/api/build-exe', { method: 'POST' }),
-        fetch('/api/rust-source'),
+        fetch('/api/python-source'),
       ]);
       if (buildRes.ok) {
         const bJson = await buildRes.json();
         if (bJson.ok) {
           setBuilderResult(bJson);
-          setStatusMsg(`EXE Builder package ready (v${bJson.version}, SHA-256: ${bJson.zipSha256.slice(0, 12)}...).`);
+          setStatusMsg(`PyQt6 EXE Builder package ready (v${bJson.version}, SHA-256: ${bJson.zipSha256.slice(0, 12)}...).`);
         }
       }
       if (srcRes.ok) {
@@ -2095,9 +2095,9 @@ export default function App() {
               >
                 {(
                   [
-                    { id: 'builder', label: 'EXE Builder (build.bat / .zip)' },
+                    { id: 'builder', label: 'PyInstaller EXE Builder (build.bat / .zip)' },
                     { id: 'readme', label: 'README.md' },
-                    { id: 'source', label: 'Rust Source & Build Scripts' },
+                    { id: 'source', label: 'Python / PyQt6 Source & Build Scripts' },
                   ] as const
                 ).map((t) => {
                   const active = builderTab === t.id;
@@ -2127,11 +2127,11 @@ export default function App() {
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <div className="text-[14px] font-bold">
-                          Windows Portable Executable Builder (`dist\GitHubReleaseTracker.exe`)
+                          Python + PyQt6 Portable Executable Builder (`dist\GitHubReleaseTracker.exe`)
                         </div>
                         <div style={{ color: pal.sub_fg }} className="text-[12px] mt-0.5">
-                          Includes configurable Source &amp; Target columns (PC, Android, Switch,
-                          Switch 2, PS5, PS4, PS3), static CRT linking, and Win32 DPI manifest.
+                          Includes configurable Source &amp; Target QComboBox columns (PC, Android, Switch,
+                          Switch 2, PS5, PS4, PS3) and 1-click PyInstaller single-file `.exe` packaging.
                         </div>
                       </div>
 
@@ -2149,7 +2149,7 @@ export default function App() {
                           className="px-3 rounded-[4px] border text-[12px] inline-flex items-center gap-1.5 cursor-pointer"
                         >
                           <RefreshCw size={12} className={builderRunning ? 'animate-spin' : ''} />
-                          <span>Re-verify &amp; Build Package</span>
+                          <span>Run Python Tests &amp; Package</span>
                         </button>
                         <button
                           type="button"
@@ -2163,13 +2163,50 @@ export default function App() {
                           className="px-3 rounded-[4px] border text-[12px] font-medium inline-flex items-center gap-1.5 cursor-pointer"
                         >
                           <Download size={13} />
-                          <span>Download Project &amp; EXE Builder (.zip)</span>
+                          <span>Download PyQt6 Project &amp; EXE Builder (.zip)</span>
                         </button>
                       </div>
                     </div>
 
                     {/* Quick script download buttons */}
                     <div className="flex flex-wrap items-center gap-2">
+                      {rustFiles['github_release_tracker.py'] && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleDownloadSingleFile(
+                              'github_release_tracker.py',
+                              rustFiles['github_release_tracker.py']
+                            )
+                          }
+                          style={{
+                            backgroundColor: pal.btn_bg,
+                            color: pal.fg,
+                            borderColor: pal.border,
+                            height: 26,
+                          }}
+                          className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
+                        >
+                          Download github_release_tracker.py
+                        </button>
+                      )}
+                      {rustFiles['tracker_core.py'] && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleDownloadSingleFile('tracker_core.py', rustFiles['tracker_core.py'])
+                          }
+                          style={{
+                            backgroundColor: pal.btn_bg,
+                            color: pal.fg,
+                            borderColor: pal.border,
+                            height: 26,
+                          }}
+                          className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
+                        >
+                          Download tracker_core.py
+                        </button>
+                      )}
                       {rustFiles['build.bat'] && (
                         <button
                           type="button"
