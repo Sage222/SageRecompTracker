@@ -2,8 +2,11 @@
 """GitHub Release Tracker (Portable Single-File PyQt6 Edition).
 
 A self-contained, portable single-file Python + PyQt6 desktop application that
-tracks the latest release of GitHub projects with configurable Source and Target
-platform columns (PC, Android, Switch, Switch 2, PS5, PS4, PS3) via drop-down box.
+tracks the latest release of GitHub projects with:
+- A free-text Comment column at the very left (Column 0)
+- Configurable Source column (PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox)
+- Configurable Target column (PC, Android, Switch, Switch 2, PS5, PS4, PS3)
+- Persistent column widths saved automatically and on application exit.
 
 Portable runtime behavior:
 - Stores `projects.json` (and atomic temp/backup files) directly next to
@@ -40,8 +43,20 @@ NO_DESCRIPTION = "No description, website, or topics provided."
 MAX_PROJECTS = 500
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_CUSTOM_NAME = 80
+MAX_COMMENT_LEN = 300
 
-PLATFORMS: Tuple[str, ...] = (
+SOURCE_PLATFORMS: Tuple[str, ...] = (
+    "PC",
+    "Android",
+    "Switch",
+    "Switch 2",
+    "PS5",
+    "PS4",
+    "PS3",
+    "Xbox",
+)
+
+TARGET_PLATFORMS: Tuple[str, ...] = (
     "PC",
     "Android",
     "Switch",
@@ -51,7 +66,10 @@ PLATFORMS: Tuple[str, ...] = (
     "PS3",
 )
 
+PLATFORMS: Tuple[str, ...] = SOURCE_PLATFORMS
+
 SORTABLE: Tuple[str, ...] = (
+    "comment",
     "name",
     "repo",
     "source",
@@ -61,6 +79,7 @@ SORTABLE: Tuple[str, ...] = (
 )
 
 COLS: Tuple[Tuple[str, str], ...] = (
+    ("comment", "Comment"),
     ("name", "Project"),
     ("repo", "Repository"),
     ("source", "Source"),
@@ -71,8 +90,8 @@ COLS: Tuple[Tuple[str, str], ...] = (
     ("checked", "Last checked"),
 )
 
-COL_BASE: Tuple[int, ...] = (200, 230, 105, 105, 140, 115, 230, 130)
-COL_MIN: Tuple[int, ...] = (110, 110, 85, 85, 90, 105, 120, 105)
+COL_BASE: Tuple[int, ...] = (150, 190, 210, 105, 105, 135, 110, 210, 125)
+COL_MIN: Tuple[int, ...] = (90, 110, 110, 85, 85, 90, 100, 120, 100)
 
 
 # ===========================================================================
@@ -113,7 +132,6 @@ def _make_png_icon_bytes(size: int = 32) -> bytes:
     for y in range(size):
         raw_rows.append(0)  # filter type 0
         for x in range(size):
-            # Rounded blue badge (#2f6fbf) with white update arrow glyph
             dx = min(x, size - 1 - x)
             dy = min(y, size - 1 - y)
             if dx + dy < 4 and (dx < 2 or dy < 2):
@@ -148,7 +166,6 @@ def ensure_portable_icon() -> Optional[Path]:
         return ico_path
     try:
         png = _make_png_icon_bytes(32)
-        # Valid Windows ICO container with embedded PNG payload
         ico_header = struct.pack("<HHH", 0, 1, 1)
         ico_entry = struct.pack("<BBBBHHII", 32, 32, 0, 0, 1, 32, len(png), 22)
         ico_path.write_bytes(ico_header + ico_entry + png)
@@ -175,13 +192,41 @@ def default_platform() -> str:
     return "PC"
 
 
-def normalize_platform(value: Any) -> str:
+def normalize_source_platform(value: Any) -> str:
     if isinstance(value, str):
         trimmed = value.strip().lower()
-        for p in PLATFORMS:
+        for p in SOURCE_PLATFORMS:
             if p.lower() == trimmed:
                 return p
     return default_platform()
+
+
+def normalize_target_platform(value: Any) -> str:
+    if isinstance(value, str):
+        trimmed = value.strip().lower()
+        for p in TARGET_PLATFORMS:
+            if p.lower() == trimmed:
+                return p
+    return default_platform()
+
+
+def normalize_platform(value: Any, is_source: bool = True) -> str:
+    if is_source:
+        return normalize_source_platform(value)
+    return normalize_target_platform(value)
+
+
+def normalize_col_widths(raw: Any) -> List[int]:
+    """Validate and clamp saved column widths to COL_MIN."""
+    if isinstance(raw, (list, tuple)) and len(raw) == len(COLS):
+        out: List[int] = []
+        for i, val in enumerate(raw):
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                out.append(max(COL_MIN[i], min(1600, int(val))))
+            else:
+                return list(COL_BASE)
+        return out
+    return list(COL_BASE)
 
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
@@ -270,6 +315,12 @@ def clean_name(s: str) -> str:
         return ""
     joined = " ".join(s.split())
     return joined[:MAX_CUSTOM_NAME].strip()
+
+
+def clean_comment(s: Any) -> str:
+    if not isinstance(s, str):
+        return ""
+    return s.replace("\r", " ").replace("\n", " ").strip()[:MAX_COMMENT_LEN]
 
 
 def now_iso() -> str:
@@ -388,6 +439,15 @@ def apply_rename(p: Dict[str, Any], typed: str) -> Optional[str]:
     return f"Name reset to {after}."
 
 
+def apply_comment(p: Dict[str, Any], typed: str) -> Optional[str]:
+    text = clean_comment(typed)
+    before = clean_comment(p.get("comment", ""))
+    if text == before:
+        return None
+    p["comment"] = text
+    return f"Comment updated for {display_name(p)}." if text else f"Comment cleared for {display_name(p)}."
+
+
 def _normalize_release(v: Any, owner: str, repo: str) -> Optional[Dict[str, Any]]:
     if not isinstance(v, dict):
         return None
@@ -436,6 +496,7 @@ def normalize_project(raw: Any) -> Optional[Dict[str, Any]]:
     custom = clean_name(o["custom_name"]) if isinstance(o.get("custom_name"), str) else ""
     error = _str_field(o.get("error"), 300)
     seen_tag = _str_field(o.get("seen_tag"), 200)
+    comment = clean_comment(o.get("comment", ""))
 
     proj: Dict[str, Any] = {
         "owner": owner,
@@ -452,8 +513,9 @@ def normalize_project(raw: Any) -> Optional[Dict[str, Any]]:
         "seen_tag": seen_tag if seen_tag else None,
         "last_checked": _str_field(o.get("last_checked"), 40),
         "error": error if error else None,
-        "source": normalize_platform(o.get("source")),
-        "target": normalize_platform(o.get("target")),
+        "comment": comment,
+        "source": normalize_source_platform(o.get("source")),
+        "target": normalize_target_platform(o.get("target")),
     }
     if custom:
         proj["custom_name"] = custom
@@ -516,6 +578,7 @@ def default_data() -> Dict[str, Any]:
             "theme": "",
             "sort_col": "",
             "sort_asc": True,
+            "col_widths": list(COL_BASE),
         },
         "projects": [],
     }
@@ -544,6 +607,7 @@ def parse_data(text: str) -> Optional[Dict[str, Any]]:
         sc = s.get("sort_col")
         data["settings"]["sort_col"] = sc if sc in SORTABLE else ""
         data["settings"]["sort_asc"] = s.get("sort_asc") is not False
+        data["settings"]["col_widths"] = normalize_col_widths(s.get("col_widths"))
 
     parsed = parse_import(v)
     data["projects"] = parsed[0] if parsed else []
@@ -597,6 +661,15 @@ def sort_order(projects: List[Dict[str, Any]], col: str, asc: bool) -> List[int]
                 project_key(projects[i]),
             )
         )
+    elif col == "comment":
+        idx.sort(
+            key=lambda i: (
+                str(projects[i].get("comment", "")).lower(),
+                title_key(projects[i]),
+                project_key(projects[i]),
+            ),
+            reverse=not asc,
+        )
     elif col == "name":
         idx.sort(
             key=lambda i: (title_key(projects[i]), project_key(projects[i])),
@@ -645,7 +718,7 @@ def layout_columns(base: Tuple[int, ...], low: Tuple[int, ...], avail: int) -> L
         t = max(0.0, (avail - total_low) / max(1, total_pref - total_low))
         target = [lo + (p - lo) * t for p, lo in zip(base, low)]
     sizes = [max(lo, int(x)) for x, lo in zip(target, low)]
-    status_idx = 6 if len(sizes) > 6 else 4
+    status_idx = 7 if len(sizes) > 7 else (len(sizes) - 2)
     if avail >= total_low and len(sizes) > status_idx:
         sizes[status_idx] += max(0, avail - sum(sizes))
     return sizes
@@ -1172,13 +1245,15 @@ def run_gui() -> int:
             self.net = HttpNet()
             self.busy = False
             self.suppress_events = False
-            self.col_base = list(COL_BASE)
+            self.col_base = normalize_col_widths(
+                self.data["settings"].get("col_widths")
+            )
             self.view_indices: List[int] = []
             self.worker: Optional[QThread] = None
 
             self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
-            self.resize(1260, 560)
-            self.setMinimumSize(840, 340)
+            self.resize(1340, 560)
+            self.setMinimumSize(900, 340)
 
             icon_path = ensure_portable_icon()
             if icon_path and icon_path.exists():
@@ -1251,7 +1326,7 @@ def run_gui() -> int:
             row2.addWidget(self.settings_btn)
             root.addLayout(row2)
 
-            # Row 3: 8-Column Table (Project, Repository, Source, Target, Current release, Published, Status, Last checked)
+            # Row 3: 9-Column Table (Comment, Project, Repository, Source, Target, Current release, Published, Status, Last checked)
             self.table = QTableWidget(0, len(COLS), self)
             self.table.setHorizontalHeaderLabels([title for _, title in COLS])
             self.table.verticalHeader().setVisible(False)
@@ -1301,7 +1376,7 @@ def run_gui() -> int:
             self.apply_theme()
             self.update_headings()
             self.render_table()
-            self.apply_columns()
+            self.restore_saved_columns()
 
             if self.data["projects"]:
                 updates = sum(1 for p in self.data["projects"] if has_update(p))
@@ -1405,12 +1480,33 @@ def run_gui() -> int:
             self.apply_theme()
             self.set_status("Dark mode" if self.dark else "Light mode")
 
+        def restore_saved_columns(self) -> None:
+            """Apply the saved column widths loaded from projects.json."""
+            self.suppress_events = True
+            for i, w in enumerate(self.col_base):
+                self.table.setColumnWidth(i, max(COL_MIN[i], int(w)))
+            self.suppress_events = False
+
+        def save_current_column_widths(self) -> None:
+            """Capture current QTableWidget column widths into settings and persist."""
+            widths = [
+                max(COL_MIN[i], self.table.columnWidth(i)) for i in range(len(COLS))
+            ]
+            self.col_base = widths
+            self.data["settings"]["col_widths"] = list(widths)
+            self.persist()
+
+        def closeEvent(self, event: Any) -> None:
+            """Save column widths and application state to projects.json on exit."""
+            self.save_current_column_widths()
+            super().closeEvent(event)
+
         def resizeEvent(self, event: Any) -> None:
             super().resizeEvent(event)
             self.apply_columns()
 
         def apply_columns(self) -> None:
-            avail = max(700, self.table.viewport().width())
+            avail = max(780, self.table.viewport().width())
             widths = layout_columns(tuple(self.col_base), COL_MIN, avail)
             self.suppress_events = True
             for i, w in enumerate(widths):
@@ -1422,6 +1518,8 @@ def run_gui() -> int:
                 return
             if 0 <= logical_index < len(self.col_base):
                 self.col_base[logical_index] = max(COL_MIN[logical_index], new_size)
+                self.data["settings"]["col_widths"] = list(self.col_base)
+                self.persist()
 
         def selected_keys(self) -> List[str]:
             rows = sorted({idx.row() for idx in self.table.selectedIndexes()})
@@ -1485,6 +1583,7 @@ def run_gui() -> int:
                     fg_color = QColor(p["none_fg"])
 
                 texts = [
+                    str(proj.get("comment", "")),
                     display_name(proj),
                     f"{proj['owner']}/{proj['repo']}",
                     proj.get("source", "PC"),
@@ -1496,11 +1595,38 @@ def run_gui() -> int:
                 ]
 
                 for col, text in enumerate(texts):
-                    if col in (2, 3):
-                        field_name = "source" if col == 2 else "target"
+                    if col == 0:
+                        # Col 0: Free-text Comment column at the very left
+                        comment_edit = QLineEdit(text, self.table)
+                        comment_edit.setMaxLength(MAX_COMMENT_LEN)
+                        comment_edit.setPlaceholderText("Add comment...")
+                        comment_edit.setFrame(False)
+                        comment_edit.setStyleSheet(
+                            f"background: transparent; color: {p['fg']}; border: none; padding: 1px 4px;"
+                        )
+                        comment_edit.editingFinished.connect(
+                            lambda ed=comment_edit, k=pkey: self.on_comment_edited(
+                                k, ed.text()
+                            )
+                        )
+                        self.table.setCellWidget(row, col, comment_edit)
+                        # Backing item for row background color
+                        bg_item = QTableWidgetItem("")
+                        bg_item.setBackground(bg_color)
+                        bg_item.setForeground(fg_color)
+                        bg_item.setFlags(bg_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                        self.table.setItem(row, col, bg_item)
+                    elif col in (3, 4):
+                        # Col 3: Source (includes Xbox) | Col 4: Target
+                        field_name = "source" if col == 3 else "target"
+                        choices = SOURCE_PLATFORMS if col == 3 else TARGET_PLATFORMS
                         combo = QComboBox(self.table)
-                        combo.addItems(list(PLATFORMS))
-                        curr_val = normalize_platform(proj.get(field_name))
+                        combo.addItems(list(choices))
+                        curr_val = (
+                            normalize_source_platform(proj.get(field_name))
+                            if col == 3
+                            else normalize_target_platform(proj.get(field_name))
+                        )
                         combo.setCurrentText(curr_val)
                         combo.currentTextChanged.connect(
                             lambda val, k=pkey, f=field_name: self.on_platform_changed(
@@ -1512,7 +1638,8 @@ def run_gui() -> int:
                         item = QTableWidgetItem(text)
                         item.setBackground(bg_color)
                         item.setForeground(fg_color)
-                        if col == 0:
+                        if col == 1:
+                            # Col 1: Project name (editable via F2 / double-click)
                             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
                         else:
                             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -1523,10 +1650,25 @@ def run_gui() -> int:
 
             self.suppress_events = False
 
+        def on_comment_edited(self, pkey: str, text: str) -> None:
+            if self.suppress_events:
+                return
+            for proj in self.data["projects"]:
+                if project_key(proj) == pkey:
+                    msg = apply_comment(proj, text)
+                    if msg:
+                        self.persist()
+                        self.set_status(msg)
+                    break
+
         def on_platform_changed(self, pkey: str, field: str, value: str) -> None:
             if self.suppress_events:
                 return
-            norm = normalize_platform(value)
+            norm = (
+                normalize_source_platform(value)
+                if field == "source"
+                else normalize_target_platform(value)
+            )
             for proj in self.data["projects"]:
                 if project_key(proj) == pkey:
                     if proj.get(field) != norm:
@@ -1613,6 +1755,7 @@ def run_gui() -> int:
                 "seen_tag": latest["tag"] if isinstance(latest, dict) else None,
                 "last_checked": now_iso(),
                 "error": None,
+                "comment": "",
                 "source": default_platform(),
                 "target": default_platform(),
             }
@@ -1772,12 +1915,12 @@ def run_gui() -> int:
             if len(rows) != 1:
                 self.set_status("Select one project to rename.")
                 return
-            item = self.table.item(rows[0], 0)
+            item = self.table.item(rows[0], 1)
             if item:
                 self.table.editItem(item)
 
         def on_item_changed(self, item: QTableWidgetItem) -> None:
-            if self.suppress_events or item.column() != 0:
+            if self.suppress_events or item.column() != 1:
                 return
             row = item.row()
             if 0 <= row < len(self.view_indices):
@@ -1804,10 +1947,15 @@ def run_gui() -> int:
 
         def on_cell_double_clicked(self, row: int, col: int) -> None:
             if col == 0:
-                item = self.table.item(row, 0)
+                w = self.table.cellWidget(row, 0)
+                if isinstance(w, QLineEdit):
+                    w.setFocus()
+                    w.selectAll()
+            elif col == 1:
+                item = self.table.item(row, 1)
                 if item:
                     self.table.editItem(item)
-            elif col not in (2, 3):
+            elif col not in (3, 4):
                 self.open_release()
 
         def on_table_context_menu(self, pos: Any) -> None:
@@ -2070,6 +2218,31 @@ class TestPortableTracker(unittest.TestCase):
         assert ico is not None
         self.assertTrue(ico.exists())
 
+    def test_comment_column_at_very_left_and_col_widths_saved(self) -> None:
+        self.assertEqual(COLS[0], ("comment", "Comment"))
+        self.assertEqual(len(COLS), 9)
+        p = normalize_project(
+            {"owner": "o", "repo": "r", "comment": "  My free-text note \n here  "}
+        )
+        assert p is not None
+        self.assertEqual(p["comment"], "My free-text note   here")
+        msg = apply_comment(p, "Updated note")
+        self.assertIsNotNone(msg)
+        self.assertEqual(p["comment"], "Updated note")
+
+        # Verify column widths persistence round-trip
+        custom_widths = [180, 210, 220, 110, 115, 140, 120, 250, 130]
+        raw_json = json.dumps(
+            {
+                "settings": {"col_widths": custom_widths},
+                "projects": [p],
+            }
+        )
+        loaded = parse_data(raw_json)
+        assert loaded is not None
+        self.assertEqual(loaded["settings"]["col_widths"], custom_widths)
+        self.assertEqual(loaded["projects"][0]["comment"], "Updated note")
+
     def test_parse_repo_cases(self) -> None:
         def ok(s: str) -> Optional[str]:
             r = parse_repo(s)
@@ -2125,20 +2298,24 @@ class TestPortableTracker(unittest.TestCase):
             (7, "v9", True, "release"),
         )
 
-    def test_platform_columns_and_normalization(self) -> None:
+    def test_platform_columns_with_xbox_source(self) -> None:
         self.assertEqual(
-            PLATFORMS,
+            SOURCE_PLATFORMS,
+            ("PC", "Android", "Switch", "Switch 2", "PS5", "PS4", "PS3", "Xbox"),
+        )
+        self.assertEqual(
+            TARGET_PLATFORMS,
             ("PC", "Android", "Switch", "Switch 2", "PS5", "PS4", "PS3"),
         )
-        for plat in PLATFORMS:
-            self.assertEqual(normalize_platform(plat), plat)
-            self.assertEqual(normalize_platform(plat.lower()), plat)
+        for plat in SOURCE_PLATFORMS:
+            self.assertEqual(normalize_source_platform(plat), plat)
+            self.assertEqual(normalize_source_platform(plat.lower()), plat)
 
         p = normalize_project(
-            {"owner": "o", "repo": "r", "source": "Switch 2", "target": "PS5"}
+            {"owner": "o", "repo": "r", "source": "xbox", "target": "PS5"}
         )
         assert p is not None
-        self.assertEqual(p["source"], "Switch 2")
+        self.assertEqual(p["source"], "Xbox")
         self.assertEqual(p["target"], "PS5")
 
         p_def = normalize_project({"owner": "o", "repo": "r", "source": "unknown"})
@@ -2181,18 +2358,21 @@ class TestPortableTracker(unittest.TestCase):
         self.assertTrue(has_update(p))
         self.assertEqual(status_text(p), "Update available: v1 -> v2")
 
-    def test_sorting_including_source_and_target(self) -> None:
+    def test_sorting_including_comment_source_and_target(self) -> None:
         a = normalize_project(
-            {"owner": "o", "repo": "alpha", "source": "Switch 2", "target": "PC"}
+            {"owner": "o", "repo": "alpha", "comment": "Zeta", "source": "Xbox", "target": "PC"}
         )
         b = normalize_project(
-            {"owner": "o", "repo": "bravo", "source": "Android", "target": "PS5"}
+            {"owner": "o", "repo": "bravo", "comment": "Alpha", "source": "Android", "target": "PS5"}
         )
         c = normalize_project(
-            {"owner": "o", "repo": "charlie", "source": "PS3", "target": "Android"}
+            {"owner": "o", "repo": "charlie", "comment": "Mid", "source": "PS3", "target": "Android"}
         )
         assert a and b and c
         items = [a, b, c]
+
+        by_comment = [items[i]["repo"] for i in sort_order(items, "comment", True)]
+        self.assertEqual(by_comment, ["bravo", "charlie", "alpha"])
 
         by_source = [items[i]["repo"] for i in sort_order(items, "source", True)]
         self.assertEqual(by_source, ["bravo", "charlie", "alpha"])
@@ -2201,9 +2381,9 @@ class TestPortableTracker(unittest.TestCase):
         self.assertEqual(by_target, ["charlie", "alpha", "bravo"])
 
     def test_column_layout_fills_width(self) -> None:
-        for avail in (830, 1000, 1200, 1400, 1900):
+        for avail in (950, 1100, 1300, 1500, 1900):
             w = layout_columns(COL_BASE, COL_MIN, avail)
-            self.assertEqual(len(w), 8)
+            self.assertEqual(len(w), 9)
             self.assertTrue(all(a >= m for a, m in zip(w, COL_MIN)))
             if avail >= sum(COL_MIN):
                 self.assertEqual(sum(w), avail)

@@ -12,23 +12,19 @@ A small, portable desktop app contained in a **single Python file (`github_relea
 ## Features
 
 - Add a project by pasting a GitHub URL or `owner/repo`
-- See the project name, repository, **Source** platform, **Target** platform, current release, publish date, status, and last checked timestamp at a glance
-- **Configurable Source & Target columns**: Configure both **Source** and **Target** for every tracked project via an inline `QComboBox` drop-down box with options:
-  - `PC`
-  - `Android`
-  - `Switch`
-  - `Switch 2`
-  - `PS5`
-  - `PS4`
-  - `PS3`
+- **Free-text `Comment` column at the very left (Column 0)**: Type free-text notes or comments directly in the leftmost column of any project row; comments are saved automatically to `projects.json` and can be sorted by clicking the **Comment** header
+- See the comment, project name, repository, **Source** platform, **Target** platform, current release, publish date, status, and last checked timestamp at a glance
+- **Configurable Source & Target columns**: Configure both **Source** and **Target** for every tracked project via an inline `QComboBox` drop-down box:
+  - **Source options**: `PC`, `Android`, `Switch`, `Switch 2`, `PS5`, `PS4`, `PS3`, `Xbox`
+  - **Target options**: `PC`, `Android`, `Switch`, `Switch 2`, `PS5`, `PS4`, `PS3`
+- **Column widths saved on exit**: Dragging any column border saves your custom column widths into `settings.col_widths` in `projects.json` both immediately and in `MainWindow.closeEvent` on exit, and restores them on launch
 - **Check for updates** refreshes every project on a background `QThread`; a newer release is highlighted as `Update available: v1.0 -> v1.1`
 - **Mark as seen** clears the highlight once you have dealt with an update
 - Double-click a project row (or use **Open release page**) to open its release page in your browser; double-clicking the **Project** name renames it instead
 - **Rename** a project: select it and press **F2**, right-click > Rename, or double-click the name. *Reset name* brings the GitHub name back
-- Click the **Project**, **Repository**, **Source**, **Target**, **Published** or **Status** header to sort (click again to reverse)
-- **Import / Export** the list as `.json` (merge or replace on import; preserves `source` and `target` platform selections; the token is never exported)
+- Click the **Comment**, **Project**, **Repository**, **Source**, **Target**, **Published** or **Status** header to sort (click again to reverse)
+- **Import / Export** the list as `.json` (merge or replace on import; preserves `comment`, `source`, and `target` selections; the token is never exported)
 - **Light / dark** mode: click the moon / sun icon at the bottom right (starts with your Windows theme)
-- Columns resize in proportion when you resize the window; drag a column border to change the proportions
 
 ## Run the Portable Single `.py` File Directly
 

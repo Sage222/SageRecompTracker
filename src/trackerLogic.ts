@@ -5,13 +5,46 @@ export const NO_DESCRIPTION = 'No description, website, or topics provided.';
 export const MAX_PROJECTS = 500;
 export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 export const MAX_CUSTOM_NAME = 80;
+export const MAX_COMMENT_LEN = 300;
 
-export const PLATFORMS = ['PC', 'Android', 'Switch', 'Switch 2', 'PS5', 'PS4', 'PS3'] as const;
-export type Platform = (typeof PLATFORMS)[number];
+export const SOURCE_PLATFORMS = [
+  'PC',
+  'Android',
+  'Switch',
+  'Switch 2',
+  'PS5',
+  'PS4',
+  'PS3',
+  'Xbox',
+] as const;
+export type SourcePlatform = (typeof SOURCE_PLATFORMS)[number];
 
-export const SORTABLE = ['name', 'repo', 'source', 'target', 'published', 'status'] as const;
+export const TARGET_PLATFORMS = [
+  'PC',
+  'Android',
+  'Switch',
+  'Switch 2',
+  'PS5',
+  'PS4',
+  'PS3',
+] as const;
+export type TargetPlatform = (typeof TARGET_PLATFORMS)[number];
+
+export const PLATFORMS = SOURCE_PLATFORMS;
+export type Platform = SourcePlatform;
+
+export const SORTABLE = [
+  'comment',
+  'name',
+  'repo',
+  'source',
+  'target',
+  'published',
+  'status',
+] as const;
 
 export const COLS: ReadonlyArray<{ id: string; title: string }> = [
+  { id: 'comment', title: 'Comment' },
   { id: 'name', title: 'Project' },
   { id: 'repo', title: 'Repository' },
   { id: 'source', title: 'Source' },
@@ -22,8 +55,8 @@ export const COLS: ReadonlyArray<{ id: string; title: string }> = [
   { id: 'checked', title: 'Last checked' },
 ];
 
-export const COL_BASE: number[] = [200, 230, 105, 105, 140, 115, 230, 130];
-export const COL_MIN: number[] = [110, 110, 85, 85, 90, 105, 120, 105];
+export const COL_BASE: number[] = [150, 190, 210, 105, 105, 135, 110, 210, 125];
+export const COL_MIN: number[] = [90, 110, 110, 85, 85, 90, 100, 120, 100];
 
 export type ReleaseId = number | string;
 
@@ -51,8 +84,9 @@ export interface Project {
   last_checked: string;
   error: string | null;
   custom_name?: string;
-  source: Platform;
-  target: Platform;
+  comment: string;
+  source: SourcePlatform;
+  target: TargetPlatform;
 }
 
 export interface Settings {
@@ -61,6 +95,7 @@ export interface Settings {
   theme: 'light' | 'dark' | '';
   sort_col: string;
   sort_asc: boolean;
+  col_widths: number[];
 }
 
 export interface TrackerData {
@@ -87,20 +122,59 @@ export class GitHubError extends Error {
   }
 }
 
-export function defaultPlatform(): Platform {
+export function defaultPlatform(): 'PC' {
   return 'PC';
 }
 
-export function normalizePlatform(raw: unknown): Platform {
+export function normalizeSourcePlatform(raw: unknown): SourcePlatform {
   if (typeof raw === 'string') {
     const trimmed = raw.trim().toLowerCase();
-    for (const p of PLATFORMS) {
+    for (const p of SOURCE_PLATFORMS) {
       if (p.toLowerCase() === trimmed) {
         return p;
       }
     }
   }
   return defaultPlatform();
+}
+
+export function normalizeTargetPlatform(raw: unknown): TargetPlatform {
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim().toLowerCase();
+    for (const p of TARGET_PLATFORMS) {
+      if (p.toLowerCase() === trimmed) {
+        return p;
+      }
+    }
+  }
+  return defaultPlatform();
+}
+
+export function normalizePlatform(raw: unknown, isSource = true): Platform {
+  return isSource ? normalizeSourcePlatform(raw) : normalizeTargetPlatform(raw);
+}
+
+export function normalizeColWidths(raw: unknown): number[] {
+  if (Array.isArray(raw) && raw.length === COLS.length) {
+    const out: number[] = [];
+    for (let i = 0; i < COLS.length; i++) {
+      const val = raw[i];
+      if (typeof val === 'number' && Number.isFinite(val)) {
+        out.push(Math.max(COL_MIN[i], Math.min(1600, Math.round(val))));
+      } else {
+        return [...COL_BASE];
+      }
+    }
+    return out;
+  }
+  return [...COL_BASE];
+}
+
+export function cleanComment(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return Array.from(raw.replace(/[\r\n]+/g, ' ').trim())
+    .slice(0, MAX_COMMENT_LEN)
+    .join('');
 }
 
 function isNameChar(c: string): boolean {
@@ -344,6 +418,7 @@ export function normalizeProject(raw: unknown): Project | null {
   const custom = typeof o.custom_name === 'string' ? cleanName(o.custom_name) : '';
   const error = trimChars(o.error, 300);
   const seenTag = trimChars(o.seen_tag, 200);
+  const comment = cleanComment(o.comment);
 
   const proj: Project = {
     owner,
@@ -358,8 +433,9 @@ export function normalizeProject(raw: unknown): Project | null {
     seen_tag: seenTag || null,
     last_checked: trimChars(o.last_checked, 40),
     error: error || null,
-    source: normalizePlatform(o.source),
-    target: normalizePlatform(o.target),
+    comment,
+    source: normalizeSourcePlatform(o.source),
+    target: normalizeTargetPlatform(o.target),
   };
   if (custom) {
     proj.custom_name = custom;
@@ -445,6 +521,17 @@ export function sortOrder(projects: Project[], col: string, asc: boolean): numbe
         [sign * statusRank(pb), titleKey(pb), projectKey(pb)]
       );
     });
+  } else if (col === 'comment') {
+    idx.sort((a, b) => {
+      const pa = projects[a];
+      const pb = projects[b];
+      return dir(
+        cmpTuple(
+          [(pa.comment || '').toLowerCase(), titleKey(pa), projectKey(pa)],
+          [(pb.comment || '').toLowerCase(), titleKey(pb), projectKey(pb)]
+        )
+      );
+    });
   } else if (col === 'name') {
     idx.sort((a, b) => {
       const pa = projects[a];
@@ -506,7 +593,7 @@ export function layoutColumns(base: number[], low: number[], avail: number): num
     target = base.map((p, i) => low[i] + (p - low[i]) * t);
   }
   const sizes = target.map((x, i) => Math.max(low[i], Math.floor(x)));
-  const statusIdx = sizes.length > 6 ? 6 : 4;
+  const statusIdx = sizes.length > 7 ? 7 : sizes.length - 2;
   if (avail >= totalLow && sizes.length > statusIdx) {
     const sum = sizes.reduce((a, b) => a + b, 0);
     sizes[statusIdx] += Math.max(0, avail - sum);

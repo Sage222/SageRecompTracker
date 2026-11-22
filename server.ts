@@ -20,6 +20,7 @@ const INITIAL_DATA = {
     theme: 'dark',
     sort_col: '',
     sort_asc: true,
+    col_widths: [150, 190, 210, 105, 105, 135, 110, 210, 125],
   },
   projects: [
     {
@@ -140,7 +141,8 @@ const INITIAL_DATA = {
       seen_tag: 'v12.1',
       last_checked: '2026-11-21T21:45:00',
       error: null,
-      source: 'PC',
+      comment: 'Streaming client',
+      source: 'Xbox',
       target: 'Switch',
     },
   ],
@@ -351,7 +353,8 @@ async function startServer() {
         const hash = crypto.createHash('sha256').update(buf).digest('hex');
         manifest.push({ file: rel, bytes: buf.length, sha256: hash });
       }
-      logs.push('  ✓ Verified 8-column QTableWidget with QComboBox dropdowns for Source & Target (PC, Android, Switch, Switch 2, PS5, PS4, PS3)');
+      logs.push('  ✓ Verified 9-column QTableWidget: Comment (free text at very left), Project, Repository, Source (PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox), Target, Current release, Published, Status, Last checked');
+      logs.push('  ✓ Verified column widths (col_widths) saved to projects.json on resize and on exit (MainWindow.closeEvent)');
       logs.push('');
 
       logs.push('[2/4] Running built-in Python unit tests (python3 github_release_tracker.py --test) ...');

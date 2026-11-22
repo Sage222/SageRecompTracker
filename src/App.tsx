@@ -20,19 +20,23 @@ import {
   COL_BASE,
   COL_MIN,
   COLS,
+  MAX_COMMENT_LEN,
   MAX_CUSTOM_NAME,
   MAX_IMPORT_BYTES,
   NO_DESCRIPTION,
-  PLATFORMS,
-  Platform,
   Project,
   REPO_URL,
   SORTABLE,
+  SOURCE_PLATFORMS,
+  SourcePlatform,
+  TARGET_PLATFORMS,
+  TargetPlatform,
   TrackerData,
   applyRename,
   applyResult,
   buildExport,
   checkedLabel,
+  cleanComment,
   defaultPlatform,
   displayName,
   fetchRepoInfo,
@@ -42,8 +46,10 @@ import {
   hasUpdate,
   layoutColumns,
   mergeProjects,
-  normalizePlatform,
+  normalizeColWidths,
   normalizeProject,
+  normalizeSourcePlatform,
+  normalizeTargetPlatform,
   nowIso,
   parseImport,
   parseRepo,
@@ -151,6 +157,7 @@ export default function App() {
       theme: 'dark',
       sort_col: '',
       sort_asc: true,
+      col_widths: [...COL_BASE],
     },
     projects: [],
   });
@@ -166,7 +173,7 @@ export default function App() {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState('');
   const [colBase, setColBase] = useState<number[]>(() => [...COL_BASE]);
-  const [listWidth, setListWidth] = useState<number>(1255);
+  const [listWidth, setListWidth] = useState<number>(1340);
   const [modal, setModal] = useState<ModalState>({ type: 'none' });
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
@@ -247,6 +254,7 @@ export default function App() {
                     ? obj.settings.sort_col
                     : '',
                 sort_asc: obj.settings?.sort_asc !== false,
+                col_widths: normalizeColWidths(obj.settings?.col_widths),
               },
               projects: imported.projects,
             };
@@ -277,6 +285,7 @@ export default function App() {
                       ? obj.settings.sort_col
                       : '',
                   sort_asc: obj.settings?.sort_asc !== false,
+                  col_widths: normalizeColWidths(obj.settings?.col_widths),
                 },
                 projects: imported.projects,
               };
@@ -289,6 +298,7 @@ export default function App() {
 
       if (!cancelled && parsedData) {
         setData(parsedData);
+        setColBase(normalizeColWidths(parsedData.settings.col_widths));
         if (parsedData.projects.length > 0) {
           const updates = parsedData.projects.filter(hasUpdate).length;
           setStatusMsg(
@@ -349,10 +359,32 @@ export default function App() {
     }
   }, [editingKey]);
 
+  // Save column widths on page unload / exit
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      const normalized = normalizeColWidths(colBase);
+      const next: TrackerData = {
+        ...data,
+        settings: {
+          ...data.settings,
+          col_widths: normalized,
+        },
+      };
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next, null, 2));
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [colBase, data]);
+
   // Column divider dragging
   const handleColResizeStart = (e: React.MouseEvent, colIdx: number) => {
     e.preventDefault();
     e.stopPropagation();
+    let latestWidths = [...colWidths];
     dragColRef.current = {
       colIdx,
       startX: e.clientX,
@@ -370,6 +402,7 @@ export default function App() {
       if (slack > 0) {
         cur[cur.length - 1] = Math.max(COL_MIN[cur.length - 1], cur[cur.length - 1] + slack);
       }
+      latestWidths = cur;
       setColBase(cur);
     };
 
@@ -377,6 +410,18 @@ export default function App() {
       dragColRef.current = null;
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
+      const normalized = normalizeColWidths(latestWidths);
+      setData((prev) => {
+        const next: TrackerData = {
+          ...prev,
+          settings: {
+            ...prev.settings,
+            col_widths: normalized,
+          },
+        };
+        persistData(next);
+        return next;
+      });
     };
 
     window.addEventListener('mousemove', onMouseMove);
@@ -423,17 +468,54 @@ export default function App() {
     setStatusMsg(nextDark ? 'Dark mode' : 'Light mode');
   };
 
-  // Update Source or Target platform via dropdown box
-  const handlePlatformChange = (key: string, field: 'source' | 'target', value: string) => {
-    const normalized = normalizePlatform(value);
+  // Update free-text Comment column (Column 0 at very left)
+  const handleCommentChange = (key: string, value: string) => {
+    const cleaned = Array.from(value.replace(/[\r\n]+/g, ' '))
+      .slice(0, MAX_COMMENT_LEN)
+      .join('');
     const nextProjects = data.projects.map((p) => {
       if (projectKey(p) !== key) return p;
-      return { ...p, [field]: normalized };
+      return { ...p, comment: cleaned };
     });
     const next: TrackerData = { ...data, projects: nextProjects };
     setData(next);
     persistData(next);
-    setStatusMsg(`${field === 'source' ? 'Source' : 'Target'} set to ${normalized}.`);
+  };
+
+  const handleCommentBlur = (key: string, value: string) => {
+    const cleaned = cleanComment(value);
+    const nextProjects = data.projects.map((p) => {
+      if (projectKey(p) !== key) return p;
+      return { ...p, comment: cleaned };
+    });
+    const next: TrackerData = { ...data, projects: nextProjects };
+    setData(next);
+    persistData(next);
+  };
+
+  // Update Source or Target platform via dropdown box
+  const handlePlatformChange = (key: string, field: 'source' | 'target', value: string) => {
+    if (field === 'source') {
+      const normalized = normalizeSourcePlatform(value);
+      const nextProjects = data.projects.map((p) => {
+        if (projectKey(p) !== key) return p;
+        return { ...p, source: normalized };
+      });
+      const next: TrackerData = { ...data, projects: nextProjects };
+      setData(next);
+      persistData(next);
+      setStatusMsg(`Source set to ${normalized}.`);
+    } else {
+      const normalized = normalizeTargetPlatform(value);
+      const nextProjects = data.projects.map((p) => {
+        if (projectKey(p) !== key) return p;
+        return { ...p, target: normalized };
+      });
+      const next: TrackerData = { ...data, projects: nextProjects };
+      setData(next);
+      persistData(next);
+      setStatusMsg(`Target set to ${normalized}.`);
+    }
   };
 
   // Add project
@@ -496,6 +578,7 @@ export default function App() {
         latest,
         last_checked: nowIso(),
         error: null,
+        comment: '',
         source: defaultPlatform(),
         target: defaultPlatform(),
       };
@@ -1291,10 +1374,39 @@ export default function App() {
                 }}
                 className="flex items-center h-[26px] shrink-0 text-[13px]"
               >
-                {/* Col 0: Project (with hover rename pencil & double-click to rename) */}
+                {/* Col 0: Comment (free text at the very left) */}
                 <div
                   style={{
                     width: colWidths[0],
+                    borderRight: `1px solid ${pal.line}`,
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    selectRow(key);
+                  }}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  className="h-full flex items-center px-[4px] shrink-0"
+                >
+                  <input
+                    type="text"
+                    maxLength={MAX_COMMENT_LEN}
+                    aria-label={`Comment for ${displayName(p)}`}
+                    placeholder="Add comment..."
+                    value={p.comment || ''}
+                    onChange={(e) => handleCommentChange(key, e.target.value)}
+                    onBlur={(e) => handleCommentBlur(key, e.target.value)}
+                    style={{
+                      backgroundColor: 'transparent',
+                      color: rowFg,
+                    }}
+                    className="w-full h-[21px] px-1 outline-none border-none text-[12.5px] select-text placeholder:opacity-45"
+                  />
+                </div>
+
+                {/* Col 1: Project (with hover rename pencil & double-click to rename) */}
+                <div
+                  style={{
+                    width: colWidths[1],
                     borderRight: `1px solid ${pal.line}`,
                   }}
                   onDoubleClick={(e) => {
@@ -1353,10 +1465,10 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Col 1: Repository */}
+                {/* Col 2: Repository */}
                 <div
                   style={{
-                    width: colWidths[1],
+                    width: colWidths[2],
                     borderRight: `1px solid ${pal.line}`,
                   }}
                   onDoubleClick={() => handleOpenRelease(p)}
@@ -1365,10 +1477,10 @@ export default function App() {
                   <span className="truncate">{`${p.owner}/${p.repo}`}</span>
                 </div>
 
-                {/* Col 2: Source (Configurable dropdown box: PC, Android, Switch, Switch 2, PS5, PS4, PS3) */}
+                {/* Col 3: Source (Configurable dropdown box: PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox) */}
                 <div
                   style={{
-                    width: colWidths[2],
+                    width: colWidths[3],
                     borderRight: `1px solid ${pal.line}`,
                   }}
                   onClick={(e) => {
@@ -1389,7 +1501,7 @@ export default function App() {
                     }}
                     className="w-full h-[21px] px-1 rounded-[3px] border text-[12px] outline-none cursor-pointer"
                   >
-                    {PLATFORMS.map((plat: Platform) => (
+                    {SOURCE_PLATFORMS.map((plat: SourcePlatform) => (
                       <option
                         key={plat}
                         value={plat}
@@ -1404,10 +1516,10 @@ export default function App() {
                   </select>
                 </div>
 
-                {/* Col 3: Target (Configurable dropdown box: PC, Android, Switch, Switch 2, PS5, PS4, PS3) */}
+                {/* Col 4: Target (Configurable dropdown box: PC, Android, Switch, Switch 2, PS5, PS4, PS3) */}
                 <div
                   style={{
-                    width: colWidths[3],
+                    width: colWidths[4],
                     borderRight: `1px solid ${pal.line}`,
                   }}
                   onClick={(e) => {
@@ -1428,7 +1540,7 @@ export default function App() {
                     }}
                     className="w-full h-[21px] px-1 rounded-[3px] border text-[12px] outline-none cursor-pointer"
                   >
-                    {PLATFORMS.map((plat: Platform) => (
+                    {TARGET_PLATFORMS.map((plat: TargetPlatform) => (
                       <option
                         key={plat}
                         value={plat}
@@ -1443,19 +1555,7 @@ export default function App() {
                   </select>
                 </div>
 
-                {/* Col 4: Current release */}
-                <div
-                  style={{
-                    width: colWidths[4],
-                    borderRight: `1px solid ${pal.line}`,
-                  }}
-                  onDoubleClick={() => handleOpenRelease(p)}
-                  className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
-                >
-                  <span className="truncate">{releaseLabel(p)}</span>
-                </div>
-
-                {/* Col 5: Published */}
+                {/* Col 5: Current release */}
                 <div
                   style={{
                     width: colWidths[5],
@@ -1464,13 +1564,25 @@ export default function App() {
                   onDoubleClick={() => handleOpenRelease(p)}
                   className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
                 >
-                  <span className="truncate">{publishedLabel(p)}</span>
+                  <span className="truncate">{releaseLabel(p)}</span>
                 </div>
 
-                {/* Col 6: Status */}
+                {/* Col 6: Published */}
                 <div
                   style={{
                     width: colWidths[6],
+                    borderRight: `1px solid ${pal.line}`,
+                  }}
+                  onDoubleClick={() => handleOpenRelease(p)}
+                  className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
+                >
+                  <span className="truncate">{publishedLabel(p)}</span>
+                </div>
+
+                {/* Col 7: Status */}
+                <div
+                  style={{
+                    width: colWidths[7],
                     borderRight: `1px solid ${pal.line}`,
                   }}
                   onDoubleClick={() => handleOpenRelease(p)}
@@ -1479,10 +1591,10 @@ export default function App() {
                   <span className="truncate">{statusText(p)}</span>
                 </div>
 
-                {/* Col 7: Last checked */}
+                {/* Col 8: Last checked */}
                 <div
                   style={{
-                    width: colWidths[7],
+                    width: colWidths[8],
                   }}
                   onDoubleClick={() => handleOpenRelease(p)}
                   className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
