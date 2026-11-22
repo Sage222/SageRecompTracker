@@ -20,13 +20,67 @@ const INITIAL_DATA = {
     theme: 'dark',
     sort_col: '',
     sort_asc: true,
-    col_widths: [150, 190, 210, 105, 105, 135, 110, 210, 125],
+    col_widths: [150, 180, 210, 105, 105, 135, 110, 210, 125, 180],
   },
   projects: [
+    {
+      owner: 'MagicBeanDev',
+      repo: 'Longshot',
+      title: 'Longshot',
+      user_title: 'Ocarina of Time PC Port',
+      description:
+        'A supported console game, running natively on Windows and Linux with no emulator, built from your own copy of the game. Continuation of Hookshot',
+      html_url: 'https://git.magicbean.dev/MagicBeanDev/Longshot',
+      include_prereleases: true,
+      fmt: 2,
+      latest: {
+        id: '12210: https://git.magicbean.dev/MagicBeanDev/Longshot/releases/tag/v3.1.1',
+        tag: 'v3.1.1',
+        name: 'Longshot v3.1.1',
+        published_at: '2026-11-22T02:52:14Z',
+        url: 'https://git.magicbean.dev/MagicBeanDev/Longshot/releases/tag/v3.1.1',
+        prerelease: false,
+        source: 'feed',
+      },
+      seen_id: '12210: https://git.magicbean.dev/MagicBeanDev/Longshot/releases/tag/v3.1.1',
+      seen_tag: 'v3.1.1',
+      last_checked: '2026-11-22T08:25:00',
+      error: null,
+      comment: 'Forgejo instance (git.magicbean.dev)',
+      source: 'Wii',
+      target: 'PC',
+    },
+    {
+      owner: 'eden-emu.dev',
+      repo: 'downloads',
+      title: 'Eden',
+      user_title: 'Eden Switch Emulator',
+      description: 'The Eden Nintendo Switch Emulator',
+      html_url: 'https://eden-emu.dev/downloads/',
+      include_prereleases: true,
+      fmt: 2,
+      latest: {
+        id: '8667: https://git.eden-emu.dev/eden-emu/eden/releases/tag/v0.2.1',
+        tag: 'v0.2.1',
+        name: 'Eden v0.2.1',
+        published_at: '2026-06-01T19:57:41+02:00',
+        url: 'https://git.eden-emu.dev/eden-emu/eden/releases/tag/v0.2.1',
+        prerelease: false,
+        source: 'feed',
+      },
+      seen_id: '8667: https://git.eden-emu.dev/eden-emu/eden/releases/tag/v0.2.1',
+      seen_tag: 'v0.2.1',
+      last_checked: '2026-11-22T08:25:00',
+      error: null,
+      comment: 'Tracked via eden-emu.dev/downloads/',
+      source: 'Switch',
+      target: 'PC',
+    },
     {
       owner: 'santosasarno-code',
       repo: 'github-release-tracker-rs',
       title: 'github-release-tracker-rs',
+      user_title: 'Release Tracker Base',
       description:
         'A small, portable Windows app that tracks the latest release of the GitHub projects you care about and tells you when a new one appears.',
       html_url: 'https://github.com/santosasarno-code/github-release-tracker-rs',
@@ -45,6 +99,7 @@ const INITIAL_DATA = {
       seen_tag: 'v2.0.0',
       last_checked: '2026-11-21T21:45:00',
       error: null,
+      comment: '',
       source: 'PC',
       target: 'PC',
     },
@@ -52,6 +107,7 @@ const INITIAL_DATA = {
       owner: 'shadps4-emu',
       repo: 'shadPS4',
       title: 'shadPS4',
+      user_title: 'PS4 Emulator',
       description: 'PlayStation 4 emulator for Windows, Linux and macOS written in C++',
       html_url: 'https://github.com/shadps4-emu/shadPS4',
       include_prereleases: true,
@@ -69,61 +125,41 @@ const INITIAL_DATA = {
       seen_tag: 'v0.6.0',
       last_checked: '2026-11-21T21:45:00',
       error: null,
+      comment: '',
       source: 'PS4',
       target: 'PC',
     },
     {
-      owner: 'RPCS3',
-      repo: 'rpcs3',
-      title: 'rpcs3',
-      description: 'PS3 emulator/debugger',
-      html_url: 'https://github.com/RPCS3/rpcs3',
+      owner: 'cemu-project',
+      repo: 'Cemu',
+      title: 'Cemu',
+      user_title: 'Wii U Emulator',
+      description: 'Cemu - Wii U emulator',
+      html_url: 'https://github.com/cemu-project/Cemu',
       include_prereleases: true,
       fmt: 2,
       latest: {
-        id: 'tag:github.com,2008:Repository/rpcs3/v0.0.34',
-        tag: 'v0.0.34',
-        name: 'v0.0.34',
-        published_at: '2026-11-15T09:20:00Z',
-        url: 'https://github.com/RPCS3/rpcs3/releases/tag/v0.0.34',
+        id: 'tag:github.com,2008:Repository/Cemu/v2.4',
+        tag: 'v2.4',
+        name: 'Cemu 2.4',
+        published_at: '2026-11-14T15:10:00Z',
+        url: 'https://github.com/cemu-project/Cemu/releases/tag/v2.4',
         prerelease: false,
         source: 'feed',
       },
-      seen_id: 'tag:github.com,2008:Repository/rpcs3/v0.0.34',
-      seen_tag: 'v0.0.34',
+      seen_id: 'tag:github.com,2008:Repository/Cemu/v2.4',
+      seen_tag: 'v2.4',
       last_checked: '2026-11-21T21:45:00',
       error: null,
-      source: 'PS3',
+      comment: 'Wii U source configured',
+      source: 'Wii U',
       target: 'PC',
-    },
-    {
-      owner: 'PPSSPPTeam',
-      repo: 'ppsspp',
-      title: 'ppsspp',
-      description: 'A PSP emulator for Android, Windows, Mac and Linux, written in C++.',
-      html_url: 'https://github.com/PPSSPPTeam/ppsspp',
-      include_prereleases: true,
-      fmt: 2,
-      latest: {
-        id: 'tag:github.com,2008:Repository/ppsspp/v1.18.1',
-        tag: 'v1.18.1',
-        name: 'v1.18.1',
-        published_at: '2026-11-10T14:15:00Z',
-        url: 'https://github.com/PPSSPPTeam/ppsspp/releases/tag/v1.18.1',
-        prerelease: false,
-        source: 'feed',
-      },
-      seen_id: 'tag:github.com,2008:Repository/ppsspp/v1.18.1',
-      seen_tag: 'v1.18.1',
-      last_checked: '2026-11-21T21:45:00',
-      error: null,
-      source: 'PC',
-      target: 'Android',
     },
     {
       owner: 'moonlight-stream',
       repo: 'moonlight-android',
       title: 'moonlight-android',
+      user_title: 'Moonlight Stream',
       description: 'GameStream client for Android',
       html_url: 'https://github.com/moonlight-stream/moonlight-android',
       include_prereleases: true,
@@ -219,6 +255,48 @@ async function startServer() {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       res.status(502).json({ error: `Network error: ${msg}` });
+    }
+  });
+
+  // Proxy external Forgejo / Gitea / Downloads webpage check using github_release_tracker.py
+  app.get('/api/external-check', (req, res) => {
+    const targetUrl = String(req.query.url || '').trim();
+    const includePre = String(req.query.include_pre || '1') !== '0';
+    if (!targetUrl.startsWith('https://') && !targetUrl.startsWith('http://')) {
+      res.status(400).json({ error: 'Invalid external URL' });
+      return;
+    }
+    try {
+      const singlePyPath = path.join(PYQT_DIR, 'github_release_tracker.py');
+      const pyScript = `
+import json, sys, importlib.util
+spec = importlib.util.spec_from_file_location("grt", ${JSON.stringify(singlePyPath)})
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+url = ${JSON.stringify(targetUrl)}
+inc = ${includePre ? 'True' : 'False'}
+parsed = mod.parse_project_input(url)
+if not parsed:
+    print(json.dumps({"error": "Invalid project URL"}))
+    sys.exit(0)
+net = mod.HttpNet()
+try:
+    latest = mod.get_latest(net, parsed["owner"], parsed["repo"], "", inc, html_url=parsed["html_url"])
+    info = mod.fetch_repo_info(net, parsed["owner"], parsed["repo"], "", html_url=parsed["html_url"])
+    print(json.dumps({"info": info, "latest": latest}))
+except Exception as e:
+    print(json.dumps({"error": str(e)}))
+`;
+      const out = execFileSync('python3', ['-c', pyScript], { encoding: 'utf-8', timeout: 20000 });
+      const parsedOut = JSON.parse(out.trim());
+      if (parsedOut.error) {
+        res.status(400).json({ error: parsedOut.error });
+        return;
+      }
+      res.json(parsedOut);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.status(502).json({ error: `External site check failed: ${msg}` });
     }
   });
 
@@ -353,8 +431,9 @@ async function startServer() {
         const hash = crypto.createHash('sha256').update(buf).digest('hex');
         manifest.push({ file: rel, bytes: buf.length, sha256: hash });
       }
-      logs.push('  ✓ Verified 9-column QTableWidget: Comment (free text at very left), Project, Repository, Source (PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox), Target, Current release, Published, Status, Last checked');
-      logs.push('  ✓ Verified column widths (col_widths) saved to projects.json on resize and on exit (MainWindow.closeEvent)');
+      logs.push('  ✓ Verified 10-column QTableWidget: Title (free text at very left), Project, Repository, Source (PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox, Wii, Wii U), Target, Current release, Published, Status, Last checked, Comment (free text at far right)');
+      logs.push('  ✓ Verified multi-site release tracking: GitHub, Forgejo/Gitea (git.magicbean.dev/MagicBeanDev/Longshot), and download pages (eden-emu.dev/downloads/)');
+      logs.push('  ✓ Verified row removal with confirmation dialog & column widths saved on resize and on exit');
       logs.push('');
 
       logs.push('[2/4] Running built-in Python unit tests (python3 github_release_tracker.py --test) ...');

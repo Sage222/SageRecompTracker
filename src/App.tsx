@@ -23,6 +23,7 @@ import {
   MAX_COMMENT_LEN,
   MAX_CUSTOM_NAME,
   MAX_IMPORT_BYTES,
+  MAX_TITLE_LEN,
   NO_DESCRIPTION,
   Project,
   REPO_URL,
@@ -37,6 +38,7 @@ import {
   buildExport,
   checkedLabel,
   cleanComment,
+  cleanUserTitle,
   defaultPlatform,
   displayName,
   fetchRepoInfo,
@@ -44,7 +46,6 @@ import {
   getRateRemaining,
   GitHubError,
   hasUpdate,
-  layoutColumns,
   mergeProjects,
   normalizeColWidths,
   normalizeProject,
@@ -52,11 +53,12 @@ import {
   normalizeTargetPlatform,
   nowIso,
   parseImport,
-  parseRepo,
+  parseProjectInput,
   projectKey,
   publishedLabel,
   releaseLabel,
-  safeGithubUrl,
+  repoDisplayLabel,
+  safeHttpUrl,
   sortOrder,
   statusText,
   todayYmd,
@@ -137,7 +139,7 @@ interface ContextMenuState {
   kind: 'row' | 'status';
 }
 
-const STORAGE_KEY = 'github_release_tracker_projects_json_v2';
+const STORAGE_KEY = 'github_release_tracker_projects_json_v3';
 
 function openExternalUrl(url: string) {
   const a = document.createElement('a');
@@ -173,7 +175,6 @@ export default function App() {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState('');
   const [colBase, setColBase] = useState<number[]>(() => [...COL_BASE]);
-  const [listWidth, setListWidth] = useState<number>(1340);
   const [modal, setModal] = useState<ModalState>({ type: 'none' });
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
@@ -318,24 +319,8 @@ export default function App() {
     };
   }, []);
 
-  // Measure list view container width for proportional column sizing
-  useEffect(() => {
-    const el = listContainerRef.current;
-    if (!el) return;
-    const updateWidth = () => {
-      const w = el.clientWidth;
-      if (w > 0) setListWidth(w);
-    };
-    updateWidth();
-    const ro = new ResizeObserver(updateWidth);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  const colWidths = useMemo(
-    () => layoutColumns(colBase, COL_MIN, listWidth),
-    [colBase, listWidth]
-  );
+  // Use exact saved pixel column widths so user resizing persists without proportional rescaling
+  const colWidths = useMemo(() => normalizeColWidths(colBase), [colBase]);
 
   // Sorted view indices
   const viewIndices = useMemo(
@@ -380,7 +365,7 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [colBase, data]);
 
-  // Column divider dragging
+  // Column divider dragging — resizes only the dragged column and saves immediately
   const handleColResizeStart = (e: React.MouseEvent, colIdx: number) => {
     e.preventDefault();
     e.stopPropagation();
@@ -396,12 +381,10 @@ export default function App() {
       if (!drag) return;
       const delta = ev.clientX - drag.startX;
       const cur = [...drag.startWidths];
-      cur[drag.colIdx] = Math.max(COL_MIN[drag.colIdx], drag.startWidths[drag.colIdx] + delta);
-      const sum = cur.reduce((a, b) => a + b, 0);
-      const slack = listWidth - sum;
-      if (slack > 0) {
-        cur[cur.length - 1] = Math.max(COL_MIN[cur.length - 1], cur[cur.length - 1] + slack);
-      }
+      cur[drag.colIdx] = Math.max(
+        COL_MIN[drag.colIdx],
+        Math.min(1600, Math.round(drag.startWidths[drag.colIdx] + delta))
+      );
       latestWidths = cur;
       setColBase(cur);
     };
@@ -411,6 +394,7 @@ export default function App() {
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
       const normalized = normalizeColWidths(latestWidths);
+      setColBase(normalized);
       setData((prev) => {
         const next: TrackerData = {
           ...prev,
@@ -468,7 +452,32 @@ export default function App() {
     setStatusMsg(nextDark ? 'Dark mode' : 'Light mode');
   };
 
-  // Update free-text Comment column (Column 0 at very left)
+  // Update free-text Title column (Column 0 at very left)
+  const handleUserTitleChange = (key: string, value: string) => {
+    const cleaned = Array.from(value.replace(/[\r\n]+/g, ' '))
+      .slice(0, MAX_TITLE_LEN)
+      .join('');
+    const nextProjects = data.projects.map((p) => {
+      if (projectKey(p) !== key) return p;
+      return { ...p, user_title: cleaned };
+    });
+    const next: TrackerData = { ...data, projects: nextProjects };
+    setData(next);
+    persistData(next);
+  };
+
+  const handleUserTitleBlur = (key: string, value: string) => {
+    const cleaned = cleanUserTitle(value);
+    const nextProjects = data.projects.map((p) => {
+      if (projectKey(p) !== key) return p;
+      return { ...p, user_title: cleaned };
+    });
+    const next: TrackerData = { ...data, projects: nextProjects };
+    setData(next);
+    persistData(next);
+  };
+
+  // Update free-text Comment column (Column 9 at far right)
   const handleCommentChange = (key: string, value: string) => {
     const cleaned = Array.from(value.replace(/[\r\n]+/g, ' '))
       .slice(0, MAX_COMMENT_LEN)
@@ -518,26 +527,27 @@ export default function App() {
     }
   };
 
-  // Add project
+  // Add project (supports GitHub URLs, owner/repo, Forgejo/Gitea repos like git.magicbean.dev, and download pages like eden-emu.dev/downloads/)
   const handleAddProject = async () => {
     if (busy) return;
-    const parsed = parseRepo(entryText);
+    const parsed = parseProjectInput(entryText);
     if (!parsed) {
       setModal({
         type: 'message',
         title: APP_NAME,
-        text: 'Enter a GitHub URL such as\nhttps://github.com/owner/repo\nor just owner/repo.',
+        text: 'Enter a GitHub or Forgejo URL such as\nhttps://github.com/owner/repo\nhttps://git.magicbean.dev/MagicBeanDev/Longshot\nhttps://eden-emu.dev/downloads/\nor just owner/repo.',
         icon: 'error',
       });
       return;
     }
-    const [owner, repo] = parsed;
-    const key = `${owner}/${repo}`.toLowerCase();
-    if (data.projects.some((p) => projectKey(p) === key)) {
+    const { owner, repo, html_url } = parsed;
+    const candidateKey = projectKey({ owner, repo, html_url });
+    const displayRepo = repoDisplayLabel({ owner, repo, html_url });
+    if (data.projects.some((p) => projectKey(p) === candidateKey)) {
       setModal({
         type: 'message',
         title: APP_NAME,
-        text: `${owner}/${repo} is already in the list.`,
+        text: `${displayRepo} is already in the list.`,
         icon: 'info',
       });
       return;
@@ -545,19 +555,19 @@ export default function App() {
 
     const token = data.settings.token.trim();
     setBusy(true);
-    setStatusMsg(`Adding ${owner}/${repo} ...`);
+    setStatusMsg(`Adding ${displayRepo} ...`);
 
     try {
-      const latest = await getLatest(owner, repo, token, true);
+      const latest = await getLatest(owner, repo, token, true, html_url);
       let info = {
         owner,
         repo,
         title: repo,
         description: '',
-        html_url: `https://github.com/${owner}/${repo}`,
+        html_url,
       };
       try {
-        info = await fetchRepoInfo(owner, repo, token);
+        info = await fetchRepoInfo(owner, repo, token, html_url);
       } catch (e) {
         if (e instanceof GitHubError && e.kind === 'NotFound') {
           throw e;
@@ -569,6 +579,7 @@ export default function App() {
         owner: info.owner,
         repo: info.repo,
         title: info.title,
+        user_title: '',
         description: info.description,
         html_url: info.html_url,
         include_prereleases: true,
@@ -620,8 +631,10 @@ export default function App() {
   const handleCheckUpdates = useCallback(async () => {
     if (busy) return;
     const snapshot = data.projects.map((p) => ({
+      key: projectKey(p),
       owner: p.owner,
       repo: p.repo,
+      html_url: p.html_url,
       include_prereleases: p.include_prereleases,
     }));
     if (snapshot.length === 0) {
@@ -635,13 +648,18 @@ export default function App() {
 
     const results: Array<{ key: string; latest: Project['latest']; err: string | null }> = [];
     for (const item of snapshot) {
-      const key = `${item.owner}/${item.repo}`.toLowerCase();
       try {
-        const r = await getLatest(item.owner, item.repo, token, item.include_prereleases);
-        results.push({ key, latest: r, err: null });
+        const r = await getLatest(
+          item.owner,
+          item.repo,
+          token,
+          item.include_prereleases,
+          item.html_url
+        );
+        results.push({ key: item.key, latest: r, err: null });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        results.push({ key, latest: null, err: msg });
+        results.push({ key: item.key, latest: null, err: msg });
         if (e instanceof GitHubError && e.kind === 'RateLimit') {
           break;
         }
@@ -724,8 +742,12 @@ export default function App() {
       setStatusMsg('Select a project first.');
       return;
     }
-    const fallback = `https://github.com/${target.owner}/${target.repo}/releases`;
-    const url = safeGithubUrl(target.latest?.url, fallback);
+    const baseHtml = target.html_url || `https://github.com/${target.owner}/${target.repo}`;
+    const fallback =
+      baseHtml.endsWith('/downloads/') || baseHtml.endsWith('/downloads')
+        ? baseHtml
+        : `${baseHtml.replace(/\/+$/, '')}/releases`;
+    const url = safeHttpUrl(target.latest?.url, fallback);
     openExternalUrl(url);
   };
 
@@ -735,7 +757,7 @@ export default function App() {
       setStatusMsg('Select a project first.');
       return;
     }
-    const url = safeGithubUrl(
+    const url = safeHttpUrl(
       firstSelectedProject.html_url,
       `https://github.com/${firstSelectedProject.owner}/${firstSelectedProject.repo}`
     );
@@ -756,11 +778,11 @@ export default function App() {
     setStatusMsg(
       nextInclude
         ? 'Pre-releases included (uses the free release feed). Click "Check for updates" to apply.'
-        : 'Stable-only mode uses the GitHub API, which is rate-limited without a token. Click "Check for updates" to apply.'
+        : 'Stable-only mode uses the REST API. Click "Check for updates" to apply.'
     );
   };
 
-  // Remove selected projects
+  // Remove selected projects (with confirmation dialog)
   const handlePromptRemove = () => {
     if (selectedKeys.length === 0) {
       setStatusMsg('Select a project first.');
@@ -775,6 +797,19 @@ export default function App() {
       count: selectedKeys.length,
       names,
       keys: [...selectedKeys],
+    });
+  };
+
+  // Remove a specific row directly with confirmation dialog
+  const handlePromptRemoveRow = (key: string) => {
+    const p = data.projects.find((x) => projectKey(x) === key);
+    if (!p) return;
+    setSelectedKeys([key]);
+    setModal({
+      type: 'confirm_remove',
+      count: 1,
+      names: displayName(p),
+      keys: [key],
     });
   };
 
@@ -1146,7 +1181,7 @@ export default function App() {
           style={{ color: pal.fg }}
           className="text-[13px] whitespace-nowrap shrink-0"
         >
-          GitHub project (URL or owner/repo):
+          Project (GitHub/Forgejo URL, download page, or owner/repo):
         </label>
 
         <div
@@ -1171,7 +1206,7 @@ export default function App() {
                 handleAddProject();
               }
             }}
-            placeholder="owner/repo or https://github.com/owner/repo"
+            placeholder="owner/repo, https://git.magicbean.dev/MagicBeanDev/Longshot, or https://eden-emu.dev/downloads/"
             style={{
               backgroundColor: 'transparent',
               color: pal.fg,
@@ -1374,7 +1409,7 @@ export default function App() {
                 }}
                 className="flex items-center h-[26px] shrink-0 text-[13px]"
               >
-                {/* Col 0: Comment (free text at the very left) */}
+                {/* Col 0: Title (free-text column at the very left) */}
                 <div
                   style={{
                     width: colWidths[0],
@@ -1389,12 +1424,12 @@ export default function App() {
                 >
                   <input
                     type="text"
-                    maxLength={MAX_COMMENT_LEN}
-                    aria-label={`Comment for ${displayName(p)}`}
-                    placeholder="Add comment..."
-                    value={p.comment || ''}
-                    onChange={(e) => handleCommentChange(key, e.target.value)}
-                    onBlur={(e) => handleCommentBlur(key, e.target.value)}
+                    maxLength={MAX_TITLE_LEN}
+                    aria-label={`Title for ${displayName(p)}`}
+                    placeholder="Add title..."
+                    value={p.user_title || ''}
+                    onChange={(e) => handleUserTitleChange(key, e.target.value)}
+                    onBlur={(e) => handleUserTitleBlur(key, e.target.value)}
                     style={{
                       backgroundColor: 'transparent',
                       color: rowFg,
@@ -1403,7 +1438,7 @@ export default function App() {
                   />
                 </div>
 
-                {/* Col 1: Project (with hover rename pencil & double-click to rename) */}
+                {/* Col 1: Project (with hover rename pencil, hover remove trash button, & double-click to rename) */}
                 <div
                   style={{
                     width: colWidths[1],
@@ -1443,23 +1478,40 @@ export default function App() {
                     />
                   ) : (
                     <>
-                      <span className="truncate pr-5">{displayName(p)}</span>
+                      <span className="truncate pr-10">{displayName(p)}</span>
                       {isHovered && (
-                        <button
-                          type="button"
-                          title="Rename project (F2)"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            startRenameKey(key);
-                          }}
-                          style={{
-                            backgroundColor: rowBg,
-                            color: rowFg,
-                          }}
-                          className="w-[20px] h-[20px] flex items-center justify-center absolute right-[4px] rounded-[2px] cursor-pointer hover:opacity-80"
-                        >
-                          <Pencil size={12} />
-                        </button>
+                        <div className="flex items-center gap-0.5 absolute right-[4px]">
+                          <button
+                            type="button"
+                            title="Rename project (F2)"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              startRenameKey(key);
+                            }}
+                            style={{
+                              backgroundColor: rowBg,
+                              color: rowFg,
+                            }}
+                            className="w-[20px] h-[20px] flex items-center justify-center rounded-[2px] cursor-pointer hover:opacity-80"
+                          >
+                            <Pencil size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            title="Remove project (Del)"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handlePromptRemoveRow(key);
+                            }}
+                            style={{
+                              backgroundColor: rowBg,
+                              color: isSelected ? rowFg : pal.error_fg,
+                            }}
+                            className="w-[20px] h-[20px] flex items-center justify-center rounded-[2px] cursor-pointer hover:opacity-80"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
                       )}
                     </>
                   )}
@@ -1474,10 +1526,10 @@ export default function App() {
                   onDoubleClick={() => handleOpenRelease(p)}
                   className="h-full flex items-center px-[6px] shrink-0 truncate"
                 >
-                  <span className="truncate">{`${p.owner}/${p.repo}`}</span>
+                  <span className="truncate">{repoDisplayLabel(p)}</span>
                 </div>
 
-                {/* Col 3: Source (Configurable dropdown box: PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox) */}
+                {/* Col 3: Source (Configurable dropdown box: PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox, Wii, Wii U) */}
                 <div
                   style={{
                     width: colWidths[3],
@@ -1595,11 +1647,40 @@ export default function App() {
                 <div
                   style={{
                     width: colWidths[8],
+                    borderRight: `1px solid ${pal.line}`,
                   }}
                   onDoubleClick={() => handleOpenRelease(p)}
                   className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
                 >
                   <span className="truncate">{checkedLabel(p)}</span>
+                </div>
+
+                {/* Col 9: Comment (free text at the far right) */}
+                <div
+                  style={{
+                    width: colWidths[9],
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    selectRow(key);
+                  }}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  className="h-full flex items-center px-[4px] shrink-0"
+                >
+                  <input
+                    type="text"
+                    maxLength={MAX_COMMENT_LEN}
+                    aria-label={`Comment for ${displayName(p)}`}
+                    placeholder="Add comment..."
+                    value={p.comment || ''}
+                    onChange={(e) => handleCommentChange(key, e.target.value)}
+                    onBlur={(e) => handleCommentBlur(key, e.target.value)}
+                    style={{
+                      backgroundColor: 'transparent',
+                      color: rowFg,
+                    }}
+                    className="w-full h-[21px] px-1 outline-none border-none text-[12.5px] select-text placeholder:opacity-45"
+                  />
                 </div>
               </div>
             );

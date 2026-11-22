@@ -6,6 +6,7 @@ export const MAX_PROJECTS = 500;
 export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 export const MAX_CUSTOM_NAME = 80;
 export const MAX_COMMENT_LEN = 300;
+export const MAX_TITLE_LEN = 300;
 
 export const SOURCE_PLATFORMS = [
   'PC',
@@ -16,6 +17,8 @@ export const SOURCE_PLATFORMS = [
   'PS4',
   'PS3',
   'Xbox',
+  'Wii',
+  'Wii U',
 ] as const;
 export type SourcePlatform = (typeof SOURCE_PLATFORMS)[number];
 
@@ -34,17 +37,18 @@ export const PLATFORMS = SOURCE_PLATFORMS;
 export type Platform = SourcePlatform;
 
 export const SORTABLE = [
-  'comment',
+  'user_title',
   'name',
   'repo',
   'source',
   'target',
   'published',
   'status',
+  'comment',
 ] as const;
 
 export const COLS: ReadonlyArray<{ id: string; title: string }> = [
-  { id: 'comment', title: 'Comment' },
+  { id: 'user_title', title: 'Title' },
   { id: 'name', title: 'Project' },
   { id: 'repo', title: 'Repository' },
   { id: 'source', title: 'Source' },
@@ -53,10 +57,11 @@ export const COLS: ReadonlyArray<{ id: string; title: string }> = [
   { id: 'published', title: 'Published' },
   { id: 'status', title: 'Status' },
   { id: 'checked', title: 'Last checked' },
+  { id: 'comment', title: 'Comment' },
 ];
 
-export const COL_BASE: number[] = [150, 190, 210, 105, 105, 135, 110, 210, 125];
-export const COL_MIN: number[] = [90, 110, 110, 85, 85, 90, 100, 120, 100];
+export const COL_BASE: number[] = [150, 180, 210, 105, 105, 135, 110, 210, 125, 180];
+export const COL_MIN: number[] = [90, 110, 110, 85, 85, 90, 100, 120, 100, 90];
 
 export type ReleaseId = number | string;
 
@@ -74,6 +79,7 @@ export interface Project {
   owner: string;
   repo: string;
   title: string;
+  user_title: string;
   description: string;
   html_url: string;
   include_prereleases: boolean;
@@ -108,6 +114,14 @@ export interface RepoInfo {
   repo: string;
   title: string;
   description: string;
+  html_url: string;
+}
+
+export interface ParsedProjectInput {
+  kind: 'github' | 'forge' | 'web';
+  host: string;
+  owner: string;
+  repo: string;
   html_url: string;
 }
 
@@ -155,17 +169,25 @@ export function normalizePlatform(raw: unknown, isSource = true): Platform {
 }
 
 export function normalizeColWidths(raw: unknown): number[] {
-  if (Array.isArray(raw) && raw.length === COLS.length) {
-    const out: number[] = [];
-    for (let i = 0; i < COLS.length; i++) {
-      const val = raw[i];
-      if (typeof val === 'number' && Number.isFinite(val)) {
-        out.push(Math.max(COL_MIN[i], Math.min(1600, Math.round(val))));
-      } else {
-        return [...COL_BASE];
-      }
+  if (Array.isArray(raw)) {
+    let items = [...raw];
+    if (items.length === 8) {
+      items = [COL_BASE[0], ...items, COL_BASE[9]];
+    } else if (items.length === 9) {
+      items = [COL_BASE[0], ...items];
     }
-    return out;
+    if (items.length === COLS.length) {
+      const out: number[] = [];
+      for (let i = 0; i < COLS.length; i++) {
+        const val = items[i];
+        if (typeof val === 'number' && Number.isFinite(val)) {
+          out.push(Math.max(COL_MIN[i], Math.min(1600, Math.round(val))));
+        } else {
+          return [...COL_BASE];
+        }
+      }
+      return out;
+    }
   }
   return [...COL_BASE];
 }
@@ -174,6 +196,13 @@ export function cleanComment(raw: unknown): string {
   if (typeof raw !== 'string') return '';
   return Array.from(raw.replace(/[\r\n]+/g, ' ').trim())
     .slice(0, MAX_COMMENT_LEN)
+    .join('');
+}
+
+export function cleanUserTitle(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return Array.from(raw.replace(/[\r\n]+/g, ' ').trim())
+    .slice(0, MAX_TITLE_LEN)
     .join('');
 }
 
@@ -193,48 +222,103 @@ function takeName(s: string): [string, string] {
   return [s.slice(0, i), s.slice(i)];
 }
 
-export function parseRepo(text: string): [string, string] | null {
+export function parseProjectInput(text: string): ParsedProjectInput | null {
   const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const hasScheme = trimmed.startsWith('https://') || trimmed.startsWith('http://');
   let rest = trimmed;
+  let scheme = 'https';
   if (rest.startsWith('https://')) {
     rest = rest.slice(8);
+    scheme = 'https';
   } else if (rest.startsWith('http://')) {
     rest = rest.slice(7);
+    scheme = 'http';
   }
   if (rest.startsWith('www.')) {
     rest = rest.slice(4);
   }
 
-  let found: [string, string] | null = null;
+  // Case 1: github.com/<owner>/<repo>
   if (rest.startsWith('github.com/')) {
     const afterDomain = rest.slice('github.com/'.length);
     const [owner, r1] = takeName(afterDomain);
     if (owner && r1.startsWith('/')) {
-      const [repo] = takeName(r1.slice(1));
-      if (repo) {
-        found = [owner, repo];
+      let [repo] = takeName(r1.slice(1));
+      if (repo.endsWith('.git')) repo = repo.slice(0, -4);
+      if (repo && validName(owner) && validName(repo)) {
+        return {
+          kind: 'github',
+          host: 'github.com',
+          owner,
+          repo,
+          html_url: `https://github.com/${owner}/${repo}`,
+        };
       }
     }
+    return null;
   }
 
-  let owner: string;
-  let repo: string;
-  if (found) {
-    [owner, repo] = found;
-  } else {
-    const [o, r1] = takeName(trimmed);
-    if (!r1.startsWith('/')) return null;
-    const [r, tail] = takeName(r1.slice(1));
-    if (!o || !r || tail.length > 0) return null;
-    owner = o;
-    repo = r;
+  // Case 2: External HTTP(S) URL (e.g. https://git.magicbean.dev/MagicBeanDev/Longshot or https://eden-emu.dev/downloads/)
+  if (hasScheme) {
+    const parts = rest.split('/');
+    const host = (parts[0] || '').trim().toLowerCase();
+    if (!host || !host.includes('.') || !validName(host)) return null;
+    let segs = parts.slice(1).filter(Boolean);
+    if (segs.length > 0) {
+      segs[segs.length - 1] = segs[segs.length - 1].split(/[?#]/)[0];
+      segs = segs.filter(Boolean);
+    }
+
+    if (segs.length >= 2 && validName(segs[0]) && validName(segs[1])) {
+      const owner = segs[0];
+      const repo = segs[1].endsWith('.git') ? segs[1].slice(0, -4) : segs[1];
+      if (repo && validName(repo)) {
+        return {
+          kind: 'forge',
+          host,
+          owner,
+          repo,
+          html_url: `${scheme}://${host}/${owner}/${repo}`,
+        };
+      }
+    }
+
+    let slug = segs.length > 0 && validName(segs[0]) ? segs[0] : host.split('.')[0];
+    if (!validName(slug)) slug = 'releases';
+    const cleanPath = segs.join('/');
+    const trailing = trimmed.endsWith('/') && cleanPath ? '/' : '';
+    const fullUrl = cleanPath ? `${scheme}://${host}/${cleanPath}${trailing}` : `${scheme}://${host}`;
+    return {
+      kind: 'web',
+      host,
+      owner: host,
+      repo: slug,
+      html_url: fullUrl,
+    };
   }
 
-  if (repo.endsWith('.git')) {
-    repo = repo.slice(0, -4);
-  }
-  if (!repo) return null;
-  return [owner, repo];
+  // Case 3: Plain owner/repo shorthand
+  const [o, r1] = takeName(trimmed);
+  if (!r1.startsWith('/')) return null;
+  const [rRaw, tail] = takeName(r1.slice(1));
+  if (!o || !rRaw || tail.length > 0) return null;
+  const repo = rRaw.endsWith('.git') ? rRaw.slice(0, -4) : rRaw;
+  if (!repo || !validName(o) || !validName(repo)) return null;
+  return {
+    kind: 'github',
+    host: 'github.com',
+    owner: o,
+    repo,
+    html_url: `https://github.com/${o}/${repo}`,
+  };
+}
+
+export function parseRepo(text: string): [string, string] | null {
+  const parsed = parseProjectInput(text);
+  if (!parsed) return null;
+  return [parsed.owner, parsed.repo];
 }
 
 function trimChars(s: unknown, limit: number): string {
@@ -242,16 +326,20 @@ function trimChars(s: unknown, limit: number): string {
   return Array.from(s.trim()).slice(0, limit).join('');
 }
 
-export function safeGithubUrl(url: unknown, fallback: string): string {
+export function safeHttpUrl(url: unknown, fallback: string): string {
   if (
     typeof url === 'string' &&
-    url.startsWith('https://github.com/') &&
+    (url.startsWith('https://') || url.startsWith('http://')) &&
     url.length < 500 &&
     !/\s/.test(url)
   ) {
     return url;
   }
   return fallback;
+}
+
+export function safeGithubUrl(url: unknown, fallback: string): string {
+  return safeHttpUrl(url, fallback);
 }
 
 function idValue(v: unknown): ReleaseId | null {
@@ -269,8 +357,30 @@ export function cleanName(s: string): string {
   return Array.from(joined).slice(0, MAX_CUSTOM_NAME).join('').trim();
 }
 
-export function projectKey(p: Pick<Project, 'owner' | 'repo'>): string {
+export function projectKey(p: Pick<Project, 'owner' | 'repo'> & { html_url?: string }): string {
+  const htmlUrl = (p.html_url || '').trim().toLowerCase();
+  if (
+    htmlUrl &&
+    !htmlUrl.startsWith('https://github.com/') &&
+    !htmlUrl.startsWith('http://github.com/')
+  ) {
+    const cleaned = htmlUrl.replace(/^https?:\/\/(?:www\.)?/, '').replace(/\/+$/, '');
+    if (cleaned) return cleaned;
+  }
   return `${p.owner}/${p.repo}`.toLowerCase();
+}
+
+export function repoDisplayLabel(p: Pick<Project, 'owner' | 'repo'> & { html_url?: string }): string {
+  const htmlUrl = (p.html_url || '').trim();
+  if (
+    htmlUrl &&
+    !htmlUrl.startsWith('https://github.com/') &&
+    !htmlUrl.startsWith('http://github.com/')
+  ) {
+    const cleaned = htmlUrl.replace(/^https?:\/\/(?:www\.)?/, '').replace(/\/+$/, '');
+    if (cleaned) return cleaned;
+  }
+  return `${p.owner}/${p.repo}`;
 }
 
 export function displayName(p: Project): string {
@@ -375,7 +485,7 @@ function truthy(v: unknown): boolean {
   return false;
 }
 
-function normalizeRelease(v: unknown, owner: string, repo: string): Release | null {
+function normalizeRelease(v: unknown, owner: string, repo: string, baseHtmlUrl = ''): Release | null {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
   const r = v as Record<string, unknown>;
   const tag = trimChars(r.tag, 200);
@@ -387,12 +497,15 @@ function normalizeRelease(v: unknown, owner: string, repo: string): Release | nu
   const srcRaw = r.source;
   const source: 'release' | 'tag' | 'feed' =
     srcRaw === 'release' || srcRaw === 'tag' || srcRaw === 'feed' ? srcRaw : 'release';
+  const fallbackUrl = baseHtmlUrl
+    ? `${baseHtmlUrl.replace(/\/+$/, '')}/releases`
+    : `https://github.com/${owner}/${repo}/releases`;
   return {
     id,
     tag,
     name: trimChars(r.name, 300),
     published_at: trimChars(r.published_at, 40),
-    url: safeGithubUrl(r.url, `https://github.com/${owner}/${repo}/releases`),
+    url: safeHttpUrl(r.url, fallbackUrl),
     prerelease: r.prerelease !== undefined ? truthy(r.prerelease) : false,
     source,
   };
@@ -401,9 +514,9 @@ function normalizeRelease(v: unknown, owner: string, repo: string): Release | nu
 export function normalizeProject(raw: unknown): Project | null {
   let o: Record<string, unknown>;
   if (typeof raw === 'string') {
-    const parsed = parseRepo(raw);
+    const parsed = parseProjectInput(raw);
     if (!parsed) return null;
-    o = { owner: parsed[0], repo: parsed[1] };
+    o = { owner: parsed.owner, repo: parsed.repo, html_url: parsed.html_url };
   } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     o = raw as Record<string, unknown>;
   } else {
@@ -419,16 +532,19 @@ export function normalizeProject(raw: unknown): Project | null {
   const error = trimChars(o.error, 300);
   const seenTag = trimChars(o.seen_tag, 200);
   const comment = cleanComment(o.comment);
+  const userTitle = cleanUserTitle(o.user_title);
+  const htmlUrl = safeHttpUrl(o.html_url, `https://github.com/${owner}/${repo}`);
 
   const proj: Project = {
     owner,
     repo,
     title: title || repo,
+    user_title: userTitle,
     description: trimChars(o.description, 500),
-    html_url: safeGithubUrl(o.html_url, `https://github.com/${owner}/${repo}`),
+    html_url: htmlUrl,
     include_prereleases: o.include_prereleases !== undefined ? truthy(o.include_prereleases) : true,
     fmt: o.fmt === 2 ? 2 : null,
-    latest: normalizeRelease(o.latest, owner, repo),
+    latest: normalizeRelease(o.latest, owner, repo, htmlUrl),
     seen_id: idValue(o.seen_id),
     seen_tag: seenTag || null,
     last_checked: trimChars(o.last_checked, 40),
@@ -521,6 +637,17 @@ export function sortOrder(projects: Project[], col: string, asc: boolean): numbe
         [sign * statusRank(pb), titleKey(pb), projectKey(pb)]
       );
     });
+  } else if (col === 'user_title') {
+    idx.sort((a, b) => {
+      const pa = projects[a];
+      const pb = projects[b];
+      return dir(
+        cmpTuple(
+          [(pa.user_title || '').toLowerCase(), titleKey(pa), projectKey(pa)],
+          [(pb.user_title || '').toLowerCase(), titleKey(pb), projectKey(pb)]
+        )
+      );
+    });
   } else if (col === 'comment') {
     idx.sort((a, b) => {
       const pa = projects[a];
@@ -539,7 +666,9 @@ export function sortOrder(projects: Project[], col: string, asc: boolean): numbe
       return dir(cmpTuple([titleKey(pa), projectKey(pa)], [titleKey(pb), projectKey(pb)]));
     });
   } else if (col === 'repo') {
-    idx.sort((a, b) => dir(projectKey(projects[a]).localeCompare(projectKey(projects[b]))));
+    idx.sort((a, b) =>
+      dir(repoDisplayLabel(projects[a]).toLowerCase().localeCompare(repoDisplayLabel(projects[b]).toLowerCase()))
+    );
   } else if (col === 'source') {
     idx.sort((a, b) => {
       const pa = projects[a];
@@ -622,7 +751,7 @@ export function applyRename(p: Project, typed: string): { project: Project; mess
 }
 
 // ---------------------------------------------------------------------------
-// Atom Feed & GitHub API parsing (identical to Rust src/lib.rs)
+// Atom Feed & GitHub / Forgejo / Downloads API parsing
 // ---------------------------------------------------------------------------
 function decodeEntities(s: string): string {
   return s
@@ -635,7 +764,7 @@ function decodeEntities(s: string): string {
     .replace(/&#([0-9]+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)));
 }
 
-export function parseFeed(body: string, owner: string, repo: string): Release | null {
+export function parseFeed(body: string, owner: string, repo: string, baseUrl = ''): Release | null {
   if (!/<feed[\s>/]/.test(body)) {
     throw new GitHubError('Other', 'Release feed was not valid XML.');
   }
@@ -651,7 +780,7 @@ export function parseFeed(body: string, owner: string, repo: string): Release | 
 
   const entryId = getElem('id');
   const title = getElem('title');
-  const updated = getElem('updated');
+  const updated = getElem('updated') || getElem('published');
 
   let href = '';
   const linkRe = /<link\s+([^>]+?)\/?>/g;
@@ -669,6 +798,14 @@ export function parseFeed(body: string, owner: string, repo: string): Release | 
     }
   }
 
+  // Forgejo / Gitea feeds put the release URL inside <id>
+  if (!href && (entryId.includes('https://') || entryId.includes('http://'))) {
+    const urlMatch = entryId.match(/https?:\/\/[^\s<>"']+/);
+    if (urlMatch) {
+      href = urlMatch[0];
+    }
+  }
+
   const marker = '/releases/tag/';
   let tag = '';
   const markerIdx = href.indexOf(marker);
@@ -677,6 +814,13 @@ export function parseFeed(body: string, owner: string, repo: string): Release | 
       tag = decodeURIComponent(href.slice(markerIdx + marker.length));
     } catch {
       tag = href.slice(markerIdx + marker.length);
+    }
+  } else if (entryId.includes(marker)) {
+    const eIdx = entryId.indexOf(marker);
+    try {
+      tag = decodeURIComponent(entryId.slice(eIdx + marker.length));
+    } catch {
+      tag = entryId.slice(eIdx + marker.length);
     }
   } else {
     const repoMarker = 'Repository/';
@@ -690,14 +834,25 @@ export function parseFeed(body: string, owner: string, repo: string): Release | 
     }
   }
 
+  if (!tag && title) {
+    const verMatch = title.match(/\b(v?\d+\.\d+(?:\.\d+)*(?:-[0-9A-Za-z._-]+)?)\b/);
+    if (verMatch) {
+      tag = verMatch[1];
+    }
+  }
+
   if (!entryId && !tag) return null;
+
+  const fallbackUrl = baseUrl
+    ? `${baseUrl.replace(/\/+$/, '')}/releases`
+    : `https://github.com/${owner}/${repo}/releases`;
 
   return {
     id: entryId || tag,
     tag,
     name: title,
     published_at: updated,
-    url: href || `https://github.com/${owner}/${repo}/releases`,
+    url: href || fallbackUrl,
     prerelease: false,
     source: 'feed',
   };
@@ -763,6 +918,43 @@ async function feedGet(owner: string, repo: string): Promise<string> {
   throw new GitHubError('Other', `Release feed returned HTTP ${res.status}.`);
 }
 
+function isExternalUrl(htmlUrl?: string): boolean {
+  if (!htmlUrl) return false;
+  const lower = htmlUrl.trim().toLowerCase();
+  return (
+    (lower.startsWith('https://') || lower.startsWith('http://')) &&
+    !lower.startsWith('https://github.com/') &&
+    !lower.startsWith('http://github.com/')
+  );
+}
+
+async function fetchExternalCheck(
+  htmlUrl: string,
+  includePre: boolean
+): Promise<{ info: RepoInfo; latest: Release | null }> {
+  const res = await fetch(
+    `/api/external-check?url=${encodeURIComponent(htmlUrl)}&include_pre=${includePre ? '1' : '0'}`
+  );
+  if (res.status === 404) {
+    throw GitHubError.notFound();
+  }
+  if (!res.ok) {
+    let errText = `Server returned HTTP ${res.status}.`;
+    try {
+      const j = await res.json();
+      if (j && typeof j.error === 'string') errText = j.error;
+    } catch {
+      // ignore
+    }
+    throw new GitHubError('Other', errText);
+  }
+  const data = (await res.json()) as {
+    info: RepoInfo;
+    latest: Release | null;
+  };
+  return data;
+}
+
 function releaseFromApi(r: Record<string, unknown>): Release {
   const s = (k: string) => (typeof r[k] === 'string' ? (r[k] as string) : '');
   const tag = s('tag_name');
@@ -778,7 +970,16 @@ function releaseFromApi(r: Record<string, unknown>): Release {
   };
 }
 
-export async function fetchRepoInfo(owner: string, repo: string, token: string): Promise<RepoInfo> {
+export async function fetchRepoInfo(
+  owner: string,
+  repo: string,
+  token: string,
+  htmlUrl?: string
+): Promise<RepoInfo> {
+  if (isExternalUrl(htmlUrl)) {
+    const ext = await fetchExternalCheck(htmlUrl!, true);
+    return ext.info;
+  }
   const d = (await apiGet(`/repos/${owner}/${repo}`, token)) as Record<string, unknown>;
   const s = (k: string) => (typeof d[k] === 'string' ? (d[k] as string) : '');
   const full = s('full_name') || `${owner}/${repo}`;
@@ -859,15 +1060,20 @@ export async function getLatest(
   owner: string,
   repo: string,
   token: string,
-  includePre: boolean
+  includePre: boolean,
+  htmlUrl?: string
 ): Promise<Release | null> {
+  if (isExternalUrl(htmlUrl)) {
+    const ext = await fetchExternalCheck(htmlUrl!, includePre);
+    return ext.latest;
+  }
   if (includePre) {
     try {
       const body = await feedGet(owner, repo);
       const r = parseFeed(body, owner, repo);
       if (r) return r;
     } catch {
-      // Fall back to GitHub API just like Rust get_latest
+      // Fall back to GitHub API
     }
   }
   return await fetchLatestRelease(owner, repo, token, includePre);

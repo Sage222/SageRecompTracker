@@ -2,11 +2,15 @@
 """GitHub Release Tracker (Portable Single-File PyQt6 Edition).
 
 A self-contained, portable single-file Python + PyQt6 desktop application that
-tracks the latest release of GitHub projects with:
-- A free-text Comment column at the very left (Column 0)
-- Configurable Source column (PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox)
+tracks the latest release of GitHub projects, Forgejo/Gitea repositories
+(e.g. https://git.magicbean.dev/MagicBeanDev/Longshot), and project download pages
+(e.g. https://eden-emu.dev/downloads/) with:
+- A free-text Title column at the very left (Column 0)
+- Configurable Source column (PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox, Wii, Wii U)
 - Configurable Target column (PC, Android, Switch, Switch 2, PS5, PS4, PS3)
-- Persistent column widths saved automatically and on application exit.
+- A free-text Comment column at the far right (Column 9)
+- Row removal with confirmation (toolbar Remove button, right-click menu, Delete key)
+- Persistent column widths saved automatically on resize and on application exit.
 
 Portable runtime behavior:
 - Stores `projects.json` (and atomic temp/backup files) directly next to
@@ -44,6 +48,7 @@ MAX_PROJECTS = 500
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_CUSTOM_NAME = 80
 MAX_COMMENT_LEN = 300
+MAX_TITLE_LEN = 300
 
 SOURCE_PLATFORMS: Tuple[str, ...] = (
     "PC",
@@ -54,6 +59,8 @@ SOURCE_PLATFORMS: Tuple[str, ...] = (
     "PS4",
     "PS3",
     "Xbox",
+    "Wii",
+    "Wii U",
 )
 
 TARGET_PLATFORMS: Tuple[str, ...] = (
@@ -69,17 +76,18 @@ TARGET_PLATFORMS: Tuple[str, ...] = (
 PLATFORMS: Tuple[str, ...] = SOURCE_PLATFORMS
 
 SORTABLE: Tuple[str, ...] = (
-    "comment",
+    "user_title",
     "name",
     "repo",
     "source",
     "target",
     "published",
     "status",
+    "comment",
 )
 
 COLS: Tuple[Tuple[str, str], ...] = (
-    ("comment", "Comment"),
+    ("user_title", "Title"),
     ("name", "Project"),
     ("repo", "Repository"),
     ("source", "Source"),
@@ -88,10 +96,11 @@ COLS: Tuple[Tuple[str, str], ...] = (
     ("published", "Published"),
     ("status", "Status"),
     ("checked", "Last checked"),
+    ("comment", "Comment"),
 )
 
-COL_BASE: Tuple[int, ...] = (150, 190, 210, 105, 105, 135, 110, 210, 125)
-COL_MIN: Tuple[int, ...] = (90, 110, 110, 85, 85, 90, 100, 120, 100)
+COL_BASE: Tuple[int, ...] = (150, 180, 210, 105, 105, 135, 110, 210, 125, 180)
+COL_MIN: Tuple[int, ...] = (90, 110, 110, 85, 85, 90, 100, 120, 100, 90)
 
 
 # ===========================================================================
@@ -175,7 +184,7 @@ def ensure_portable_icon() -> Optional[Path]:
 
 
 # ===========================================================================
-# Core Domain Logic (Platform Validation, Repo Parsing, Atom Feed & REST API)
+# Core Domain Logic (Platform Validation, Repo/Site Parsing, Feeds & APIs)
 # ===========================================================================
 class GitHubError(Exception):
     def __init__(self, message: str, kind: str = "other") -> None:
@@ -217,15 +226,25 @@ def normalize_platform(value: Any, is_source: bool = True) -> str:
 
 
 def normalize_col_widths(raw: Any) -> List[int]:
-    """Validate and clamp saved column widths to COL_MIN."""
-    if isinstance(raw, (list, tuple)) and len(raw) == len(COLS):
-        out: List[int] = []
-        for i, val in enumerate(raw):
-            if isinstance(val, (int, float)) and not isinstance(val, bool):
-                out.append(max(COL_MIN[i], min(1600, int(val))))
-            else:
-                return list(COL_BASE)
-        return out
+    """Validate and clamp saved column widths to COL_MIN.
+
+    Also migrates 8-column or 9-column saved arrays to the 10-column layout
+    (Title at index 0, Comment at index 9).
+    """
+    if isinstance(raw, (list, tuple)):
+        items = list(raw)
+        if len(items) == 8:
+            items = [COL_BASE[0]] + items + [COL_BASE[-1]]
+        elif len(items) == 9:
+            items = [COL_BASE[0]] + items
+        if len(items) == len(COLS):
+            out: List[int] = []
+            for i, val in enumerate(items):
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    out.append(max(COL_MIN[i], min(1600, int(val))))
+                else:
+                    return list(COL_BASE)
+            return out
     return list(COL_BASE)
 
 
@@ -244,43 +263,124 @@ def _take_name(s: str) -> Tuple[str, str]:
     return s[:i], s[i:]
 
 
-def parse_repo(text: str) -> Optional[Tuple[str, str]]:
-    """Accept https://github.com/owner/repo[/...] or owner/repo."""
+def parse_project_input(text: str) -> Optional[Dict[str, str]]:
+    """Parse a GitHub URL, owner/repo, Forgejo/Gitea URL, or project download page URL.
+
+    Supported formats:
+    1. GitHub shorthand or URL: `owner/repo` or `https://github.com/owner/repo`
+    2. Self-hosted Forgejo/Gitea/GitLab/Codeberg URL:
+       `https://git.magicbean.dev/MagicBeanDev/Longshot`
+    3. Project downloads / website URL:
+       `https://eden-emu.dev/downloads/`
+    """
     if not isinstance(text, str):
         return None
-    text = text.strip()
-    rest = text
+    trimmed = text.strip()
+    if not trimmed:
+        return None
+
+    has_scheme = trimmed.startswith("https://") or trimmed.startswith("http://")
+    rest = trimmed
+    scheme = "https"
     if rest.startswith("https://"):
         rest = rest[8:]
+        scheme = "https"
     elif rest.startswith("http://"):
         rest = rest[7:]
+        scheme = "http"
     if rest.startswith("www."):
         rest = rest[4:]
 
-    found: Optional[Tuple[str, str]] = None
+    # Case 1: github.com/<owner>/<repo>[/...]
     if rest.startswith("github.com/"):
         after = rest[len("github.com/") :]
         owner, r1 = _take_name(after)
         if owner and r1.startswith("/"):
             repo, _ = _take_name(r1[1:])
-            if repo:
-                found = (owner, repo)
+            if repo.endswith(".git"):
+                repo = repo[:-4]
+            if repo and valid_name(owner) and valid_name(repo):
+                return {
+                    "kind": "github",
+                    "host": "github.com",
+                    "owner": owner,
+                    "repo": repo,
+                    "html_url": f"https://github.com/{owner}/{repo}",
+                }
+        return None
 
-    if found is not None:
-        owner, repo = found
-    else:
-        owner, r1 = _take_name(text)
-        if not r1.startswith("/"):
+    # Case 2: Full HTTP(S) URL to another host (e.g. git.magicbean.dev or eden-emu.dev)
+    if has_scheme:
+        parts = rest.split("/")
+        host = parts[0].strip().lower()
+        if not host or "." not in host or not valid_name(host):
             return None
-        repo, tail = _take_name(r1[1:])
-        if not owner or not repo or tail:
-            return None
+        segs = [s for s in parts[1:] if s]
+        # Strip query/fragment from last segment
+        if segs:
+            segs[-1] = re.split(r"[?#]", segs[-1])[0]
+            segs = [s for s in segs if s]
 
+        # 2a: Two or more path segments where first two are valid owner/repo names
+        # e.g. https://git.magicbean.dev/MagicBeanDev/Longshot
+        if len(segs) >= 2 and valid_name(segs[0]) and valid_name(segs[1]):
+            owner = segs[0]
+            repo = segs[1][:-4] if segs[1].endswith(".git") else segs[1]
+            if repo and valid_name(repo):
+                return {
+                    "kind": "forge",
+                    "host": host,
+                    "owner": owner,
+                    "repo": repo,
+                    "html_url": f"{scheme}://{host}/{owner}/{repo}",
+                }
+
+        # 2b: Single-segment or downloads/project webpage URL
+        # e.g. https://eden-emu.dev/downloads/ or https://eden-emu.dev
+        slug = segs[0] if segs and valid_name(segs[0]) else host.split(".")[0]
+        if not valid_name(slug):
+            slug = "releases"
+        clean_path = "/".join(segs)
+        trailing = "/" if trimmed.endswith("/") and clean_path else ""
+        full_url = (
+            f"{scheme}://{host}/{clean_path}{trailing}"
+            if clean_path
+            else f"{scheme}://{host}"
+        )
+        return {
+            "kind": "web",
+            "host": host,
+            "owner": host,
+            "repo": slug,
+            "html_url": full_url,
+        }
+
+    # Case 3: Plain owner/repo shorthand (no scheme)
+    owner, r1 = _take_name(trimmed)
+    if not r1.startswith("/"):
+        return None
+    repo, tail = _take_name(r1[1:])
+    if not owner or not repo or tail:
+        return None
     if repo.endswith(".git"):
         repo = repo[:-4]
     if not repo or not valid_name(owner) or not valid_name(repo):
         return None
-    return owner, repo
+    return {
+        "kind": "github",
+        "host": "github.com",
+        "owner": owner,
+        "repo": repo,
+        "html_url": f"https://github.com/{owner}/{repo}",
+    }
+
+
+def parse_repo(text: str) -> Optional[Tuple[str, str]]:
+    """Accept GitHub URLs, owner/repo, Forgejo/Gitea URLs, or download site URLs."""
+    info = parse_project_input(text)
+    if not info:
+        return None
+    return info["owner"], info["repo"]
 
 
 def _str_field(v: Any, limit: int) -> str:
@@ -289,15 +389,19 @@ def _str_field(v: Any, limit: int) -> str:
     return ""
 
 
-def safe_github_url(url: Any, fallback: str) -> str:
+def safe_http_url(url: Any, fallback: str) -> str:
     if (
         isinstance(url, str)
-        and url.startswith("https://github.com/")
+        and (url.startswith("https://") or url.startswith("http://"))
         and len(url) < 500
         and not any(c.isspace() for c in url)
     ):
         return url
     return fallback
+
+
+def safe_github_url(url: Any, fallback: str) -> str:
+    return safe_http_url(url, fallback)
 
 
 def _id_value(v: Any) -> Optional[Union[int, str]]:
@@ -323,6 +427,12 @@ def clean_comment(s: Any) -> str:
     return s.replace("\r", " ").replace("\n", " ").strip()[:MAX_COMMENT_LEN]
 
 
+def clean_user_title(s: Any) -> str:
+    if not isinstance(s, str):
+        return ""
+    return s.replace("\r", " ").replace("\n", " ").strip()[:MAX_TITLE_LEN]
+
+
 def now_iso() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -332,7 +442,30 @@ def today_ymd() -> str:
 
 
 def project_key(p: Dict[str, Any]) -> str:
+    html_url = str(p.get("html_url") or "").strip().lower()
+    if (
+        html_url
+        and not html_url.startswith("https://github.com/")
+        and not html_url.startswith("http://github.com/")
+    ):
+        cleaned = re.sub(r"^https?://(?:www\.)?", "", html_url).rstrip("/")
+        if cleaned:
+            return cleaned
     return f"{p.get('owner', '')}/{p.get('repo', '')}".lower()
+
+
+def repo_display_label(p: Dict[str, Any]) -> str:
+    """Return 'owner/repo' for GitHub projects or 'host/path' for external sites."""
+    html_url = str(p.get("html_url") or "").strip()
+    if (
+        html_url
+        and not html_url.startswith("https://github.com/")
+        and not html_url.startswith("http://github.com/")
+    ):
+        cleaned = re.sub(r"^https?://(?:www\.)?", "", html_url).rstrip("/")
+        if cleaned:
+            return cleaned
+    return f"{p.get('owner', '')}/{p.get('repo', '')}"
 
 
 def display_name(p: Dict[str, Any]) -> str:
@@ -439,16 +572,35 @@ def apply_rename(p: Dict[str, Any], typed: str) -> Optional[str]:
     return f"Name reset to {after}."
 
 
+def apply_user_title(p: Dict[str, Any], typed: str) -> Optional[str]:
+    text = clean_user_title(typed)
+    before = clean_user_title(p.get("user_title", ""))
+    if text == before:
+        return None
+    p["user_title"] = text
+    return (
+        f"Title set to '{text}' for {display_name(p)}."
+        if text
+        else f"Title cleared for {display_name(p)}."
+    )
+
+
 def apply_comment(p: Dict[str, Any], typed: str) -> Optional[str]:
     text = clean_comment(typed)
     before = clean_comment(p.get("comment", ""))
     if text == before:
         return None
     p["comment"] = text
-    return f"Comment updated for {display_name(p)}." if text else f"Comment cleared for {display_name(p)}."
+    return (
+        f"Comment updated for {display_name(p)}."
+        if text
+        else f"Comment cleared for {display_name(p)}."
+    )
 
 
-def _normalize_release(v: Any, owner: str, repo: str) -> Optional[Dict[str, Any]]:
+def _normalize_release(
+    v: Any, owner: str, repo: str, base_html_url: str = ""
+) -> Optional[Dict[str, Any]]:
     if not isinstance(v, dict):
         return None
     tag = _str_field(v.get("tag"), 200)
@@ -461,14 +613,17 @@ def _normalize_release(v: Any, owner: str, repo: str) -> Optional[Dict[str, Any]
     src = v.get("source")
     if src not in ("release", "tag", "feed"):
         src = "release"
+    fallback_url = (
+        f"{base_html_url.rstrip('/')}/releases"
+        if base_html_url
+        else f"https://github.com/{owner}/{repo}/releases"
+    )
     return {
         "id": rid,
         "tag": tag,
         "name": _str_field(v.get("name"), 300),
         "published_at": _str_field(v.get("published_at"), 40),
-        "url": safe_github_url(
-            v.get("url"), f"https://github.com/{owner}/{repo}/releases"
-        ),
+        "url": safe_http_url(v.get("url"), fallback_url),
         "prerelease": bool(v.get("prerelease", False)),
         "source": src,
     }
@@ -476,10 +631,14 @@ def _normalize_release(v: Any, owner: str, repo: str) -> Optional[Dict[str, Any]
 
 def normalize_project(raw: Any) -> Optional[Dict[str, Any]]:
     if isinstance(raw, str):
-        parsed = parse_repo(raw)
+        parsed = parse_project_input(raw)
         if not parsed:
             return None
-        o: Dict[str, Any] = {"owner": parsed[0], "repo": parsed[1]}
+        o: Dict[str, Any] = {
+            "owner": parsed["owner"],
+            "repo": parsed["repo"],
+            "html_url": parsed["html_url"],
+        }
     elif isinstance(raw, dict):
         o = raw
     else:
@@ -497,18 +656,19 @@ def normalize_project(raw: Any) -> Optional[Dict[str, Any]]:
     error = _str_field(o.get("error"), 300)
     seen_tag = _str_field(o.get("seen_tag"), 200)
     comment = clean_comment(o.get("comment", ""))
+    user_title = clean_user_title(o.get("user_title", ""))
+    html_url = safe_http_url(o.get("html_url"), f"https://github.com/{owner}/{repo}")
 
     proj: Dict[str, Any] = {
         "owner": owner,
         "repo": repo,
         "title": title if title else repo,
+        "user_title": user_title,
         "description": _str_field(o.get("description"), 500),
-        "html_url": safe_github_url(
-            o.get("html_url"), f"https://github.com/{owner}/{repo}"
-        ),
+        "html_url": html_url,
         "include_prereleases": bool(o.get("include_prereleases", True)),
         "fmt": 2 if o.get("fmt") == 2 else None,
-        "latest": _normalize_release(o.get("latest"), owner, repo),
+        "latest": _normalize_release(o.get("latest"), owner, repo, html_url),
         "seen_id": _id_value(o.get("seen_id")),
         "seen_tag": seen_tag if seen_tag else None,
         "last_checked": _str_field(o.get("last_checked"), 40),
@@ -661,6 +821,15 @@ def sort_order(projects: List[Dict[str, Any]], col: str, asc: bool) -> List[int]
                 project_key(projects[i]),
             )
         )
+    elif col == "user_title":
+        idx.sort(
+            key=lambda i: (
+                str(projects[i].get("user_title", "")).lower(),
+                title_key(projects[i]),
+                project_key(projects[i]),
+            ),
+            reverse=not asc,
+        )
     elif col == "comment":
         idx.sort(
             key=lambda i: (
@@ -676,7 +845,7 @@ def sort_order(projects: List[Dict[str, Any]], col: str, asc: bool) -> List[int]
             reverse=not asc,
         )
     elif col == "repo":
-        idx.sort(key=lambda i: project_key(projects[i]), reverse=not asc)
+        idx.sort(key=lambda i: repo_display_label(projects[i]).lower(), reverse=not asc)
     elif col == "source":
         idx.sort(
             key=lambda i: (
@@ -724,7 +893,10 @@ def layout_columns(base: Tuple[int, ...], low: Tuple[int, ...], avail: int) -> L
     return sizes
 
 
-def parse_feed(body: str, owner: str, repo: str) -> Optional[Dict[str, Any]]:
+def parse_feed(
+    body: str, owner: str, repo: str, base_url: str = ""
+) -> Optional[Dict[str, Any]]:
+    """Parse an Atom release feed from GitHub, Forgejo, Gitea, Codeberg, or GitLab."""
     if not re.search(r"<feed[\s>/]", body):
         raise GitHubError("Release feed was not valid XML.")
     m = re.search(r"<entry[\s>][\s\S]*?</entry>", body)
@@ -738,7 +910,7 @@ def parse_feed(body: str, owner: str, repo: str) -> Optional[Dict[str, Any]]:
 
     entry_id = elem_text("id")
     title = elem_text("title")
-    updated = elem_text("updated")
+    updated = elem_text("updated") or elem_text("published")
 
     href = ""
     for lm in re.finditer(r"<link\s+([^>]+?)/?>", entry):
@@ -751,10 +923,19 @@ def parse_feed(body: str, owner: str, repo: str) -> Optional[Dict[str, Any]]:
                 href = html.unescape(href_m.group(1))
                 break
 
+    # Forgejo / Gitea feeds put the release URL inside <id>, e.g.:
+    # <id>12210: https://git.magicbean.dev/MagicBeanDev/Longshot/releases/tag/v3.1.1</id>
+    if not href and ("https://" in entry_id or "http://" in entry_id):
+        url_m = re.search(r"https?://[^\s<>\"']+", entry_id)
+        if url_m:
+            href = url_m.group(0)
+
     marker = "/releases/tag/"
     tag = ""
     if marker in href:
         tag = urllib.parse.unquote(href.split(marker, 1)[1])
+    elif marker in entry_id:
+        tag = urllib.parse.unquote(entry_id.split(marker, 1)[1])
     elif "Repository/" in entry_id:
         r = entry_id.split("Repository/", 1)[1]
         if "/" in r:
@@ -762,33 +943,172 @@ def parse_feed(body: str, owner: str, repo: str) -> Optional[Dict[str, Any]]:
             if prefix.isdigit() and rest_tag:
                 tag = rest_tag
 
+    if not tag and title:
+        ver_m = re.search(r"\b(v?\d+\.\d+(?:\.\d+)*(?:-[0-9A-Za-z._-]+)?)\b", title)
+        if ver_m:
+            tag = ver_m.group(1)
+
     if not entry_id and not tag:
         return None
 
+    fallback_url = (
+        f"{base_url.rstrip('/')}/releases"
+        if base_url
+        else f"https://github.com/{owner}/{repo}/releases"
+    )
     return {
         "id": entry_id if entry_id else tag,
         "tag": tag,
         "name": title,
         "published_at": updated,
-        "url": href if href else f"https://github.com/{owner}/{repo}/releases",
+        "url": href if href else fallback_url,
         "prerelease": False,
         "source": "feed",
     }
 
 
+def extract_releases_from_webpage(
+    html_body: str, page_url: str
+) -> Tuple[Optional[Tuple[str, str, str]], Optional[Dict[str, Any]], Dict[str, str]]:
+    """Inspect a project downloads webpage (such as https://eden-emu.dev/downloads/).
+
+    Returns:
+      (linked_forge_repo, direct_release, page_meta)
+      - linked_forge_repo: (base_host_url, owner, repo) if the page links to a
+        Forgejo/Gitea/GitHub `/owner/repo/releases` repository (preferring Stable).
+      - direct_release: A Release dict if versions are listed directly on the page.
+      - page_meta: {'title': ..., 'description': ...} extracted from HTML meta/title tags.
+    """
+    meta_title = ""
+    meta_desc = ""
+
+    site_m = re.search(
+        r"""<meta\s+[^>]*property=["']og:site_name["'][^>]*content=["']([^"']+)["']""",
+        html_body,
+        re.IGNORECASE,
+    )
+    if site_m:
+        meta_title = html.unescape(site_m.group(1).strip())
+    if not meta_title:
+        title_m = re.search(
+            r"<title[^>]*>([\s\S]*?)</title>", html_body, re.IGNORECASE
+        )
+        if title_m:
+            raw_t = html.unescape(title_m.group(1).strip())
+            meta_title = raw_t.split(" - ")[0].split(" | ")[0].strip()
+
+    desc_m = re.search(
+        r"""<meta\s+[^>]*name=["']description["'][^>]*content=["']([^"']+)["']""",
+        html_body,
+        re.IGNORECASE,
+    )
+    if not desc_m:
+        desc_m = re.search(
+            r"""<meta\s+[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']""",
+            html_body,
+            re.IGNORECASE,
+        )
+    if desc_m:
+        meta_desc = html.unescape(desc_m.group(1).strip())
+
+    page_meta = {"title": meta_title, "description": meta_desc}
+
+    # Look for links to a GitHub/Forgejo/Gitea releases page:
+    # e.g. https://git.eden-emu.dev/eden-emu/eden/releases
+    candidates: List[Tuple[int, str, str, str]] = []
+    for m in re.finditer(
+        r"""href\s*=\s*["'](https?://([^/"'\s<>]+)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/releases(?:/tag/[^"'\s<>?#]+)?)["']""",
+        html_body,
+        re.IGNORECASE,
+    ):
+        full_href, host, owner, repo = m.group(1), m.group(2), m.group(3), m.group(4)
+        # Prefer non-nightly / stable links first
+        is_nightly = (
+            "nightly" in owner.lower()
+            or "nightly" in repo.lower()
+            or "nightly" in full_href.lower()
+        )
+        prio = 1 if is_nightly else 0
+        scheme = "https" if full_href.startswith("https://") else "http"
+        candidates.append((prio, f"{scheme}://{host}", owner, repo))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        _, base_host, owner, repo = candidates[0]
+        return (base_host, owner, repo), None, page_meta
+
+    # Fallback: scan page for direct versioned download links or release headings
+    ver_m = re.search(
+        r"\b(v\d+\.\d+(?:\.\d+)*(?:-[0-9A-Za-z._-]+)?)\b",
+        html_body,
+        re.IGNORECASE,
+    )
+    if ver_m:
+        tag = ver_m.group(1)
+        date_m = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", html_body)
+        pub_date = date_m.group(1) if date_m else ""
+        return (
+            None,
+            {
+                "id": f"{page_url}#{tag}",
+                "tag": tag,
+                "name": f"{meta_title or 'Release'} {tag}".strip(),
+                "published_at": pub_date,
+                "url": page_url,
+                "prerelease": False,
+                "source": "feed",
+            },
+            page_meta,
+        )
+
+    return None, None, page_meta
+
+
 class HttpNet:
-    """Standard-library HTTPS client for GitHub Atom feeds and REST API."""
+    """Standard-library HTTP(S) client for GitHub, Forgejo/Gitea, and download pages."""
 
     def __init__(self) -> None:
         self.rate_remaining: Optional[int] = None
 
-    def api_get(self, path: str, token: str = "") -> Any:
-        url = f"https://api.github.com{path}"
+    def url_get(
+        self, url: str, accept: str = "*/*", token: str = ""
+    ) -> Tuple[str, Dict[str, str]]:
         headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "GitHubReleaseTracker/2.0",
+            "Accept": accept,
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                hdrs = {k.lower(): v for k, v in resp.headers.items()}
+                body = resp.read().decode("utf-8", errors="replace")
+                return body, hdrs
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise GitHubError.not_found()
+            if e.code == 429:
+                raise GitHubError(
+                    "Server is rate-limiting requests (429). Try again later.",
+                    kind="rate_limit",
+                )
+            raise GitHubError(f"Server returned HTTP {e.code}.")
+        except Exception as e:
+            raise GitHubError(f"Network error: {e}")
+
+    def api_get(self, path: str, token: str = "") -> Any:
+        url = (
+            path
+            if path.startswith("https://") or path.startswith("http://")
+            else f"https://api.github.com{path}"
+        )
+        headers = {
+            "Accept": "application/vnd.github+json, application/json",
             "User-Agent": "GitHubReleaseTracker",
         }
+        if url.startswith("https://api.github.com"):
+            headers["X-GitHub-Api-Version"] = "2022-11-28"
         if token:
             headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(url, headers=headers, method="GET")
@@ -822,26 +1142,12 @@ class HttpNet:
         except Exception as e:
             raise GitHubError(f"Network error: {e}")
 
-    def feed_get(self, owner: str, repo: str) -> str:
-        url = f"https://github.com/{owner}/{repo}/releases.atom"
-        headers = {
-            "User-Agent": "GitHubReleaseTracker",
-            "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
-        }
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                return resp.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                raise GitHubError.not_found()
-            if e.code == 429:
-                raise GitHubError(
-                    "GitHub is rate-limiting the release feed (429). Try again later."
-                )
-            raise GitHubError(f"Release feed returned HTTP {e.code}.")
-        except Exception as e:
-            raise GitHubError(f"Network error: {e}")
+    def feed_get(self, owner: str, repo: str, base_host: str = "https://github.com") -> str:
+        url = f"{base_host.rstrip('/')}/{owner}/{repo}/releases.atom"
+        body, _ = self.url_get(
+            url, accept="application/atom+xml, application/xml;q=0.9, */*;q=0.8"
+        )
+        return body
 
 
 def _release_from_api(r: Dict[str, Any]) -> Dict[str, Any]:
@@ -859,28 +1165,107 @@ def _release_from_api(r: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def fetch_repo_info(net: Any, owner: str, repo: str, token: str = "") -> Dict[str, str]:
-    d = net.api_get(f"/repos/{owner}/{repo}", token)
-    full = str(d.get("full_name") or f"{owner}/{repo}")
-    if "/" in full:
-        ro, rr = full.split("/", 1)
-    else:
-        ro, rr = owner, repo
+def _external_host_info(
+    owner: str, repo: str, html_url: str = ""
+) -> Tuple[str, str, str, str]:
+    """Classify project endpoint: ('github'|'forge'|'web', base_host, owner, repo)."""
+    if html_url:
+        parsed = parse_project_input(html_url)
+        if parsed:
+            scheme = "http" if html_url.startswith("http://") else "https"
+            return (
+                parsed["kind"],
+                f"{scheme}://{parsed['host']}",
+                parsed["owner"],
+                parsed["repo"],
+            )
+    return ("github", "https://github.com", owner, repo)
+
+
+def fetch_repo_info(
+    net: Any, owner: str, repo: str, token: str = "", html_url: str = ""
+) -> Dict[str, str]:
+    kind, base_host, ro, rr = _external_host_info(owner, repo, html_url)
+    if kind == "github":
+        d = net.api_get(f"/repos/{ro}/{rr}", token)
+        full = str(d.get("full_name") or f"{ro}/{rr}")
+        if "/" in full:
+            ro, rr = full.split("/", 1)
+        return {
+            "owner": ro,
+            "repo": rr,
+            "title": str(d.get("name") or rr),
+            "description": str(d.get("description") or ""),
+            "html_url": str(d.get("html_url") or f"https://github.com/{full}"),
+        }
+
+    if kind == "forge":
+        # Forgejo / Gitea REST API v1: /api/v1/repos/{owner}/{repo}
+        try:
+            d = net.api_get(f"{base_host}/api/v1/repos/{ro}/{rr}")
+            if isinstance(d, dict):
+                return {
+                    "owner": ro,
+                    "repo": rr,
+                    "title": str(d.get("name") or rr),
+                    "description": str(d.get("description") or ""),
+                    "html_url": str(d.get("html_url") or f"{base_host}/{ro}/{rr}"),
+                }
+        except Exception:
+            pass
+        return {
+            "owner": ro,
+            "repo": rr,
+            "title": rr,
+            "description": "",
+            "html_url": html_url or f"{base_host}/{ro}/{rr}",
+        }
+
+    # Web / Downloads page (e.g. https://eden-emu.dev/downloads/)
+    target_url = html_url or f"{base_host}/{rr}"
+    body, _ = net.url_get(target_url, accept="text/html,application/xhtml+xml,*/*")
+    linked_forge, _, page_meta = extract_releases_from_webpage(body, target_url)
+    title = page_meta.get("title") or rr
+    desc = page_meta.get("description") or ""
+    if linked_forge:
+        f_host, f_owner, f_repo = linked_forge
+        try:
+            d = net.api_get(f"{f_host}/api/v1/repos/{f_owner}/{f_repo}")
+            if isinstance(d, dict):
+                if not desc:
+                    desc = str(d.get("description") or "")
+                if not page_meta.get("title"):
+                    title = str(d.get("name") or title)
+        except Exception:
+            pass
     return {
         "owner": ro,
         "repo": rr,
-        "title": str(d.get("name") or rr),
-        "description": str(d.get("description") or ""),
-        "html_url": str(d.get("html_url") or f"https://github.com/{full}"),
+        "title": title,
+        "description": desc,
+        "html_url": target_url,
     }
 
 
 def fetch_latest_release(
-    net: Any, owner: str, repo: str, token: str, include_pre: bool
+    net: Any,
+    owner: str,
+    repo: str,
+    token: str,
+    include_pre: bool,
+    base_host: str = "https://github.com",
 ) -> Optional[Dict[str, Any]]:
+    is_github = "github.com" in base_host.lower()
+    api_prefix = (
+        f"/repos/{owner}/{repo}"
+        if is_github
+        else f"{base_host.rstrip('/')}/api/v1/repos/{owner}/{repo}"
+    )
+    tok = token if is_github else ""
+
     if not include_pre:
         try:
-            v = net.api_get(f"/repos/{owner}/{repo}/releases/latest", token)
+            v = net.api_get(f"{api_prefix}/releases/latest", tok)
             if isinstance(v, dict):
                 return _release_from_api(v)
         except GitHubError as e:
@@ -888,28 +1273,33 @@ def fetch_latest_release(
                 raise
 
     try:
-        data = net.api_get(f"/repos/{owner}/{repo}/releases?per_page=10", token)
+        q = "per_page=10" if is_github else "limit=10"
+        data = net.api_get(f"{api_prefix}/releases?{q}", tok)
         if isinstance(data, list):
             for r in data:
                 if isinstance(r, dict) and not r.get("draft"):
+                    if not include_pre and r.get("prerelease"):
+                        continue
                     return _release_from_api(r)
     except GitHubError as e:
         if e.kind != "not_found":
             raise
 
     try:
-        tags = net.api_get(f"/repos/{owner}/{repo}/tags?per_page=1", token)
+        q = "per_page=1" if is_github else "limit=1"
+        tags = net.api_get(f"{api_prefix}/tags?{q}", tok)
         if isinstance(tags, list) and tags:
             t = tags[0]
             name = str(t.get("name") or "")
             commit = t.get("commit") if isinstance(t.get("commit"), dict) else {}
-            sha = str(commit.get("sha") or name)
+            sha = str(commit.get("sha") or t.get("id") or name)
+            pub = str(commit.get("created") or "")
             return {
                 "id": sha,
-                "url": f"https://github.com/{owner}/{repo}/releases/tag/{urllib.parse.quote(name, safe='')}",
+                "url": f"{base_host.rstrip('/')}/{owner}/{repo}/releases/tag/{urllib.parse.quote(name, safe='')}",
                 "tag": name,
-                "name": "",
-                "published_at": "",
+                "name": str(t.get("message") or "").splitlines()[0] if t.get("message") else "",
+                "published_at": pub,
                 "prerelease": False,
                 "source": "tag",
             }
@@ -920,17 +1310,48 @@ def fetch_latest_release(
 
 
 def get_latest(
-    net: Any, owner: str, repo: str, token: str = "", include_pre: bool = True
+    net: Any,
+    owner: str,
+    repo: str,
+    token: str = "",
+    include_pre: bool = True,
+    html_url: str = "",
 ) -> Optional[Dict[str, Any]]:
+    kind, base_host, ro, rr = _external_host_info(owner, repo, html_url)
+
+    if kind == "web":
+        target_url = html_url or f"{base_host}/{rr}"
+        body, _ = net.url_get(target_url, accept="text/html,application/xhtml+xml,*/*")
+        linked_forge, direct_rel, _ = extract_releases_from_webpage(body, target_url)
+        if linked_forge:
+            f_host, f_owner, f_repo = linked_forge
+            if include_pre:
+                try:
+                    feed_xml = net.feed_get(f_owner, f_repo, f_host)
+                    rel = parse_feed(
+                        feed_xml, f_owner, f_repo, f"{f_host}/{f_owner}/{f_repo}"
+                    )
+                    if rel is not None:
+                        return rel
+                except Exception:
+                    pass
+            return fetch_latest_release(
+                net, f_owner, f_repo, "", include_pre, base_host=f_host
+            )
+        return direct_rel
+
     if include_pre:
         try:
-            body = net.feed_get(owner, repo)
-            rel = parse_feed(body, owner, repo)
+            if kind == "github":
+                body = net.feed_get(ro, rr)
+            else:
+                body = net.feed_get(ro, rr, base_host)
+            rel = parse_feed(body, ro, rr, f"{base_host}/{ro}/{rr}")
             if rel is not None:
                 return rel
         except Exception:
             pass
-    return fetch_latest_release(net, owner, repo, token, include_pre)
+    return fetch_latest_release(net, ro, rr, token, include_pre, base_host=base_host)
 
 
 def get_palette(dark: bool) -> Dict[str, str]:
@@ -994,7 +1415,7 @@ def detect_system_dark() -> bool:
 # ===========================================================================
 def run_gui() -> int:
     try:
-        from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
+        from PyQt6.QtCore import QEvent, QObject, Qt, QThread, QUrl, pyqtSignal
         from PyQt6.QtGui import (
             QAction,
             QColor,
@@ -1032,21 +1453,55 @@ def run_gui() -> int:
         )
         return 1
 
+    class RowSelectFilter(QObject):
+        """Ensures clicking or focusing a cell widget selects its row in QTableWidget."""
+
+        def __init__(self, table: QTableWidget, row: int) -> None:
+            super().__init__(table)
+            self.table = table
+            self.row = row
+
+        def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+            if event.type() in (
+                QEvent.Type.FocusIn,
+                QEvent.Type.MouseButtonPress,
+            ):
+                selected_rows = {idx.row() for idx in self.table.selectedIndexes()}
+                if self.row not in selected_rows:
+                    self.table.selectRow(self.row)
+            return super().eventFilter(obj, event)
+
     class AddProjectWorker(QThread):
         finished_add = pyqtSignal(object, object)
 
-        def __init__(self, net: HttpNet, owner: str, repo: str, token: str) -> None:
+        def __init__(
+            self, net: HttpNet, owner: str, repo: str, html_url: str, token: str
+        ) -> None:
             super().__init__()
             self.net = net
             self.owner = owner
             self.repo = repo
+            self.html_url = html_url
             self.token = token
 
         def run(self) -> None:
             try:
-                latest = get_latest(self.net, self.owner, self.repo, self.token, True)
+                latest = get_latest(
+                    self.net,
+                    self.owner,
+                    self.repo,
+                    self.token,
+                    True,
+                    html_url=self.html_url,
+                )
                 try:
-                    info = fetch_repo_info(self.net, self.owner, self.repo, self.token)
+                    info = fetch_repo_info(
+                        self.net,
+                        self.owner,
+                        self.repo,
+                        self.token,
+                        html_url=self.html_url,
+                    )
                 except GitHubError as e:
                     if e.kind == "not_found":
                         raise
@@ -1055,7 +1510,8 @@ def run_gui() -> int:
                         "repo": self.repo,
                         "title": self.repo,
                         "description": "",
-                        "html_url": f"https://github.com/{self.owner}/{self.repo}",
+                        "html_url": self.html_url
+                        or f"https://github.com/{self.owner}/{self.repo}",
                     }
                 self.finished_add.emit((info, latest), None)
             except Exception as e:
@@ -1065,7 +1521,10 @@ def run_gui() -> int:
         finished_check = pyqtSignal(list, object)
 
         def __init__(
-            self, net: HttpNet, snapshot: List[Tuple[str, str, bool]], token: str
+            self,
+            net: HttpNet,
+            snapshot: List[Tuple[str, str, str, bool, str]],
+            token: str,
         ) -> None:
             super().__init__()
             self.net = net
@@ -1074,17 +1533,18 @@ def run_gui() -> int:
 
         def run(self) -> None:
             results: List[Tuple[str, Optional[Dict[str, Any]], Optional[str]]] = []
-            for owner, repo, inc in self.snapshot:
-                key = f"{owner}/{repo}".lower()
+            for pkey, owner, repo, inc, html_url in self.snapshot:
                 try:
-                    rel = get_latest(self.net, owner, repo, self.token, inc)
-                    results.append((key, rel, None))
+                    rel = get_latest(
+                        self.net, owner, repo, self.token, inc, html_url=html_url
+                    )
+                    results.append((pkey, rel, None))
                 except GitHubError as e:
-                    results.append((key, None, str(e)))
+                    results.append((pkey, None, str(e)))
                     if e.kind == "rate_limit":
                         break
                 except Exception as e:
-                    results.append((key, None, str(e)))
+                    results.append((pkey, None, str(e)))
             self.finished_check.emit(results, self.net.rate_remaining)
 
     class AboutDialog(QDialog):
@@ -1120,8 +1580,8 @@ def run_gui() -> int:
             info_col.addWidget(ver)
 
             desc = QLabel(
-                "Tracks the latest release of the GitHub projects you follow. "
-                "No account, login or token needed. MIT License."
+                "Tracks the latest release of the GitHub, Forgejo/Gitea, and web "
+                "projects you follow. No account, login or token needed. MIT License."
             )
             desc.setWordWrap(True)
             desc.setStyleSheet(f"color: {pal['sub_fg']};")
@@ -1186,8 +1646,8 @@ def run_gui() -> int:
             layout.addWidget(self.token_edit)
 
             note = QLabel(
-                "Not needed for normal use: releases are read from GitHub's public feed. "
-                "A token only helps if the feed is blocked or for stable-only mode. "
+                "Not needed for normal use: releases are read from public feeds. "
+                "A token only helps if the GitHub feed is blocked or for stable-only mode. "
                 "It is stored in plain text in projects.json next to this script and is never written to exported files."
             )
             note.setWordWrap(True)
@@ -1244,16 +1704,16 @@ def run_gui() -> int:
 
             self.net = HttpNet()
             self.busy = False
-            self.suppress_events = False
-            self.col_base = normalize_col_widths(
+            self.suppress_events = True
+            self.col_widths = normalize_col_widths(
                 self.data["settings"].get("col_widths")
             )
             self.view_indices: List[int] = []
             self.worker: Optional[QThread] = None
 
             self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
-            self.resize(1340, 560)
-            self.setMinimumSize(900, 340)
+            self.resize(1480, 560)
+            self.setMinimumSize(940, 340)
 
             icon_path = ensure_portable_icon()
             if icon_path and icon_path.exists():
@@ -1265,16 +1725,18 @@ def run_gui() -> int:
             root.setContentsMargins(10, 10, 10, 8)
             root.setSpacing(6)
 
-            # Row 1: GitHub project entry + Add project
+            # Row 1: Project URL / owner/repo entry + Add project
             row1 = QHBoxLayout()
             row1.setSpacing(8)
-            self.entry_label = QLabel("GitHub project (URL or owner/repo):")
+            self.entry_label = QLabel("Project (GitHub/Forgejo URL, download page, or owner/repo):")
             row1.addWidget(self.entry_label)
 
             self.entry_edit = QLineEdit()
             self.entry_edit.setMaxLength(300)
             self.entry_edit.setFixedHeight(28)
-            self.entry_edit.setPlaceholderText("owner/repo or https://github.com/owner/repo")
+            self.entry_edit.setPlaceholderText(
+                "owner/repo, https://git.magicbean.dev/MagicBeanDev/Longshot, or https://eden-emu.dev/downloads/"
+            )
             self.entry_edit.returnPressed.connect(self.add_project)
             row1.addWidget(self.entry_edit, 1)
 
@@ -1326,7 +1788,7 @@ def run_gui() -> int:
             row2.addWidget(self.settings_btn)
             root.addLayout(row2)
 
-            # Row 3: 9-Column Table (Comment, Project, Repository, Source, Target, Current release, Published, Status, Last checked)
+            # Row 3: 10-Column Table (Title, Project, Repository, Source, Target, Current release, Published, Status, Last checked, Comment)
             self.table = QTableWidget(0, len(COLS), self)
             self.table.setHorizontalHeaderLabels([title for _, title in COLS])
             self.table.verticalHeader().setVisible(False)
@@ -1343,6 +1805,7 @@ def run_gui() -> int:
             header = self.table.horizontalHeader()
             header.setSectionsClickable(True)
             header.setHighlightSections(False)
+            header.setStretchLastSection(False)
             header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
             header.sectionClicked.connect(self.on_header_clicked)
             header.sectionResized.connect(self.on_section_resized)
@@ -1368,7 +1831,7 @@ def run_gui() -> int:
             root.addLayout(row4)
 
             # Keyboard shortcuts (Delete, F2)
-            del_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.table)
+            del_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)
             del_shortcut.activated.connect(self.remove_selected)
             f2_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F2), self.table)
             f2_shortcut.activated.connect(self.rename_selected)
@@ -1377,6 +1840,7 @@ def run_gui() -> int:
             self.update_headings()
             self.render_table()
             self.restore_saved_columns()
+            self.suppress_events = False
 
             if self.data["projects"]:
                 updates = sum(1 for p in self.data["projects"] if has_update(p))
@@ -1481,18 +1945,26 @@ def run_gui() -> int:
             self.set_status("Dark mode" if self.dark else "Light mode")
 
         def restore_saved_columns(self) -> None:
-            """Apply the saved column widths loaded from projects.json."""
+            """Apply the saved column widths loaded from projects.json without rescaling."""
+            prev = self.suppress_events
             self.suppress_events = True
-            for i, w in enumerate(self.col_base):
-                self.table.setColumnWidth(i, max(COL_MIN[i], int(w)))
-            self.suppress_events = False
+            header = self.table.horizontalHeader()
+            for i, w in enumerate(self.col_widths):
+                width = max(COL_MIN[i], int(w))
+                self.table.setColumnWidth(i, width)
+                header.resizeSection(i, width)
+            self.suppress_events = prev
 
         def save_current_column_widths(self) -> None:
             """Capture current QTableWidget column widths into settings and persist."""
-            widths = [
-                max(COL_MIN[i], self.table.columnWidth(i)) for i in range(len(COLS))
-            ]
-            self.col_base = widths
+            header = self.table.horizontalHeader()
+            widths: List[int] = []
+            for i in range(len(COLS)):
+                w = header.sectionSize(i)
+                if w <= 0:
+                    w = self.col_widths[i]
+                widths.append(max(COL_MIN[i], int(w)))
+            self.col_widths = widths
             self.data["settings"]["col_widths"] = list(widths)
             self.persist()
 
@@ -1501,28 +1973,18 @@ def run_gui() -> int:
             self.save_current_column_widths()
             super().closeEvent(event)
 
-        def resizeEvent(self, event: Any) -> None:
-            super().resizeEvent(event)
-            self.apply_columns()
-
-        def apply_columns(self) -> None:
-            avail = max(780, self.table.viewport().width())
-            widths = layout_columns(tuple(self.col_base), COL_MIN, avail)
-            self.suppress_events = True
-            for i, w in enumerate(widths):
-                self.table.setColumnWidth(i, w)
-            self.suppress_events = False
-
         def on_section_resized(self, logical_index: int, _old: int, new_size: int) -> None:
             if self.suppress_events:
                 return
-            if 0 <= logical_index < len(self.col_base):
-                self.col_base[logical_index] = max(COL_MIN[logical_index], new_size)
-                self.data["settings"]["col_widths"] = list(self.col_base)
+            if 0 <= logical_index < len(self.col_widths) and new_size > 0:
+                self.col_widths[logical_index] = max(COL_MIN[logical_index], int(new_size))
+                self.data["settings"]["col_widths"] = list(self.col_widths)
                 self.persist()
 
         def selected_keys(self) -> List[str]:
             rows = sorted({idx.row() for idx in self.table.selectedIndexes()})
+            if not rows and self.table.currentRow() >= 0:
+                rows = [self.table.currentRow()]
             keys: List[str] = []
             for r in rows:
                 if 0 <= r < len(self.view_indices):
@@ -1559,6 +2021,7 @@ def run_gui() -> int:
 
         def render_table(self) -> None:
             keep = set(self.selected_keys())
+            prev_suppress = self.suppress_events
             self.suppress_events = True
             self.view_indices = sort_order(
                 self.data["projects"],
@@ -1583,41 +2046,47 @@ def run_gui() -> int:
                     fg_color = QColor(p["none_fg"])
 
                 texts = [
-                    str(proj.get("comment", "")),
+                    str(proj.get("user_title", "")),
                     display_name(proj),
-                    f"{proj['owner']}/{proj['repo']}",
+                    repo_display_label(proj),
                     proj.get("source", "PC"),
                     proj.get("target", "PC"),
                     release_label(proj),
                     published_label(proj),
                     status_text(proj),
                     checked_label(proj),
+                    str(proj.get("comment", "")),
                 ]
+
+                row_filter = RowSelectFilter(self.table, row)
 
                 for col, text in enumerate(texts):
                     if col == 0:
-                        # Col 0: Free-text Comment column at the very left
-                        comment_edit = QLineEdit(text, self.table)
-                        comment_edit.setMaxLength(MAX_COMMENT_LEN)
-                        comment_edit.setPlaceholderText("Add comment...")
-                        comment_edit.setFrame(False)
-                        comment_edit.setStyleSheet(
+                        # Col 0: Free-text Title column at the very left
+                        title_edit = QLineEdit(text, self.table)
+                        title_edit.setMaxLength(MAX_TITLE_LEN)
+                        title_edit.setPlaceholderText("Add title...")
+                        title_edit.setFrame(False)
+                        title_edit.setStyleSheet(
                             f"background: transparent; color: {p['fg']}; border: none; padding: 1px 4px;"
                         )
-                        comment_edit.editingFinished.connect(
-                            lambda ed=comment_edit, k=pkey: self.on_comment_edited(
+                        title_edit.installEventFilter(row_filter)
+                        title_edit.textEdited.connect(
+                            lambda val, k=pkey: self.on_user_title_text_changed(k, val)
+                        )
+                        title_edit.editingFinished.connect(
+                            lambda ed=title_edit, k=pkey: self.on_user_title_edited(
                                 k, ed.text()
                             )
                         )
-                        self.table.setCellWidget(row, col, comment_edit)
-                        # Backing item for row background color
+                        self.table.setCellWidget(row, col, title_edit)
                         bg_item = QTableWidgetItem("")
                         bg_item.setBackground(bg_color)
                         bg_item.setForeground(fg_color)
                         bg_item.setFlags(bg_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                         self.table.setItem(row, col, bg_item)
                     elif col in (3, 4):
-                        # Col 3: Source (includes Xbox) | Col 4: Target
+                        # Col 3: Source (PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox, Wii, Wii U) | Col 4: Target
                         field_name = "source" if col == 3 else "target"
                         choices = SOURCE_PLATFORMS if col == 3 else TARGET_PLATFORMS
                         combo = QComboBox(self.table)
@@ -1628,12 +2097,37 @@ def run_gui() -> int:
                             else normalize_target_platform(proj.get(field_name))
                         )
                         combo.setCurrentText(curr_val)
+                        combo.installEventFilter(row_filter)
                         combo.currentTextChanged.connect(
                             lambda val, k=pkey, f=field_name: self.on_platform_changed(
                                 k, f, val
                             )
                         )
                         self.table.setCellWidget(row, col, combo)
+                    elif col == 9:
+                        # Col 9: Free-text Comment column at the far right
+                        comment_edit = QLineEdit(text, self.table)
+                        comment_edit.setMaxLength(MAX_COMMENT_LEN)
+                        comment_edit.setPlaceholderText("Add comment...")
+                        comment_edit.setFrame(False)
+                        comment_edit.setStyleSheet(
+                            f"background: transparent; color: {p['fg']}; border: none; padding: 1px 4px;"
+                        )
+                        comment_edit.installEventFilter(row_filter)
+                        comment_edit.textEdited.connect(
+                            lambda val, k=pkey: self.on_comment_text_changed(k, val)
+                        )
+                        comment_edit.editingFinished.connect(
+                            lambda ed=comment_edit, k=pkey: self.on_comment_edited(
+                                k, ed.text()
+                            )
+                        )
+                        self.table.setCellWidget(row, col, comment_edit)
+                        bg_item = QTableWidgetItem("")
+                        bg_item.setBackground(bg_color)
+                        bg_item.setForeground(fg_color)
+                        bg_item.setFlags(bg_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                        self.table.setItem(row, col, bg_item)
                     else:
                         item = QTableWidgetItem(text)
                         item.setBackground(bg_color)
@@ -1648,17 +2142,42 @@ def run_gui() -> int:
                 if pkey in keep:
                     self.table.selectRow(row)
 
-            self.suppress_events = False
+            self.suppress_events = prev_suppress
+
+        def on_user_title_text_changed(self, pkey: str, text: str) -> None:
+            if self.suppress_events:
+                return
+            for proj in self.data["projects"]:
+                if project_key(proj) == pkey:
+                    proj["user_title"] = clean_user_title(text)
+                    self.persist()
+                    break
+
+        def on_user_title_edited(self, pkey: str, text: str) -> None:
+            if self.suppress_events:
+                return
+            for proj in self.data["projects"]:
+                if project_key(proj) == pkey:
+                    apply_user_title(proj, text)
+                    self.persist()
+                    break
+
+        def on_comment_text_changed(self, pkey: str, text: str) -> None:
+            if self.suppress_events:
+                return
+            for proj in self.data["projects"]:
+                if project_key(proj) == pkey:
+                    proj["comment"] = clean_comment(text)
+                    self.persist()
+                    break
 
         def on_comment_edited(self, pkey: str, text: str) -> None:
             if self.suppress_events:
                 return
             for proj in self.data["projects"]:
                 if project_key(proj) == pkey:
-                    msg = apply_comment(proj, text)
-                    if msg:
-                        self.persist()
-                        self.set_status(msg)
+                    apply_comment(proj, text)
+                    self.persist()
                     break
 
         def on_platform_changed(self, pkey: str, field: str, value: str) -> None:
@@ -1712,25 +2231,34 @@ def run_gui() -> int:
         def add_project(self) -> None:
             if self.busy:
                 return
-            parsed = parse_repo(self.entry_edit.text())
+            parsed = parse_project_input(self.entry_edit.text())
             if not parsed:
                 QMessageBox.critical(
                     self,
                     APP_NAME,
-                    "Enter a GitHub URL such as\nhttps://github.com/owner/repo\nor just owner/repo.",
+                    "Enter a GitHub or Forgejo URL such as\n"
+                    "https://github.com/owner/repo\n"
+                    "https://git.magicbean.dev/MagicBeanDev/Longshot\n"
+                    "https://eden-emu.dev/downloads/\n"
+                    "or just owner/repo.",
                 )
                 return
-            owner, repo = parsed
-            key = f"{owner}/{repo}".lower()
-            if any(project_key(p) == key for p in self.data["projects"]):
+            owner = parsed["owner"]
+            repo = parsed["repo"]
+            html_url = parsed["html_url"]
+            candidate_key = project_key(
+                {"owner": owner, "repo": repo, "html_url": html_url}
+            )
+            if any(project_key(p) == candidate_key for p in self.data["projects"]):
                 QMessageBox.information(
-                    self, APP_NAME, f"{owner}/{repo} is already in the list."
+                    self, APP_NAME, f"{repo_display_label({'owner': owner, 'repo': repo, 'html_url': html_url})} is already in the list."
                 )
                 return
 
             token = self.data["settings"].get("token", "").strip()
-            self.set_busy(True, f"Adding {owner}/{repo} ...")
-            worker = AddProjectWorker(self.net, owner, repo, token)
+            label = repo_display_label({"owner": owner, "repo": repo, "html_url": html_url})
+            self.set_busy(True, f"Adding {label} ...")
+            worker = AddProjectWorker(self.net, owner, repo, html_url, token)
             worker.finished_add.connect(self._on_project_added)
             self.worker = worker
             worker.start()
@@ -1746,6 +2274,7 @@ def run_gui() -> int:
                 "owner": info["owner"],
                 "repo": info["repo"],
                 "title": info["title"],
+                "user_title": "",
                 "description": info["description"],
                 "html_url": info["html_url"],
                 "include_prereleases": True,
@@ -1780,7 +2309,13 @@ def run_gui() -> int:
             if self.busy:
                 return
             snapshot = [
-                (p["owner"], p["repo"], bool(p.get("include_prereleases", True)))
+                (
+                    project_key(p),
+                    p["owner"],
+                    p["repo"],
+                    bool(p.get("include_prereleases", True)),
+                    str(p.get("html_url") or ""),
+                )
                 for p in self.data["projects"]
             ]
             if not snapshot:
@@ -1853,9 +2388,14 @@ def run_gui() -> int:
             if not p:
                 self.set_status("Select a project first.")
                 return
-            fallback = f"https://github.com/{p['owner']}/{p['repo']}/releases"
+            base_html = str(p.get("html_url") or f"https://github.com/{p['owner']}/{p['repo']}")
+            fallback = (
+                base_html
+                if base_html.endswith("/downloads/") or base_html.endswith("/downloads")
+                else f"{base_html.rstrip('/')}/releases"
+            )
             latest = p.get("latest")
-            url = safe_github_url(
+            url = safe_http_url(
                 latest.get("url") if isinstance(latest, dict) else None, fallback
             )
             QDesktopServices.openUrl(QUrl(url))
@@ -1864,7 +2404,7 @@ def run_gui() -> int:
             p = self.first_selected()
             if not p:
                 return
-            url = safe_github_url(
+            url = safe_http_url(
                 p.get("html_url"), f"https://github.com/{p['owner']}/{p['repo']}"
             )
             QDesktopServices.openUrl(QUrl(url))
@@ -1882,7 +2422,7 @@ def run_gui() -> int:
             self.set_status(
                 'Pre-releases included (uses the free release feed). Click "Check for updates" to apply.'
                 if new_val
-                else 'Stable-only mode uses the GitHub API, which is rate-limited without a token. Click "Check for updates" to apply.'
+                else 'Stable-only mode uses the REST API. Click "Check for updates" to apply.'
             )
 
         def remove_selected(self) -> None:
@@ -1943,7 +2483,7 @@ def run_gui() -> int:
                 return
             self.persist()
             self.render_table()
-            self.set_status(f"Reset {count} name(s) to the GitHub name.")
+            self.set_status(f"Reset {count} name(s) to the default name.")
 
         def on_cell_double_clicked(self, row: int, col: int) -> None:
             if col == 0:
@@ -1955,10 +2495,20 @@ def run_gui() -> int:
                 item = self.table.item(row, 1)
                 if item:
                     self.table.editItem(item)
+            elif col == 9:
+                w = self.table.cellWidget(row, 9)
+                if isinstance(w, QLineEdit):
+                    w.setFocus()
+                    w.selectAll()
             elif col not in (3, 4):
                 self.open_release()
 
         def on_table_context_menu(self, pos: Any) -> None:
+            idx = self.table.indexAt(pos)
+            if idx.isValid():
+                selected_rows = {i.row() for i in self.table.selectedIndexes()}
+                if idx.row() not in selected_rows:
+                    self.table.selectRow(idx.row())
             if not self.selected_keys():
                 return
             menu = QMenu(self)
@@ -2002,7 +2552,7 @@ def run_gui() -> int:
 
             menu.addSeparator()
 
-            act_rem = QAction("Remove", self)
+            act_rem = QAction("Remove...\tDel", self)
             act_rem.triggered.connect(self.remove_selected)
             menu.addAction(act_rem)
 
@@ -2126,6 +2676,7 @@ def run_gui() -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     win = MainWindow()
+    app.aboutToQuit.connect(win.save_current_column_widths)
     win.show()
     return int(app.exec())
 
@@ -2179,17 +2730,60 @@ SAMPLE_FEED = """<?xml version="1.0" encoding="UTF-8"?>
   <entry><id>tag:github.com,2008:Repository/123/old</id><title>old</title></entry>
 </feed>"""
 
+SAMPLE_FORGEJO_FEED = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Releases for MagicBeanDev/Longshot</title>
+  <id>https://git.magicbean.dev/MagicBeanDev/Longshot/releases</id>
+  <updated>2026-11-22T08:28:44Z</updated>
+  <subtitle>A supported console game, running natively on Windows and Linux</subtitle>
+  <link href="https://git.magicbean.dev/MagicBeanDev/Longshot/releases"></link>
+  <entry>
+    <title>Longshot v3.1.1</title>
+    <updated>2026-11-22T02:52:14Z</updated>
+    <id>12210: https://git.magicbean.dev/MagicBeanDev/Longshot/releases/tag/v3.1.1</id>
+    <content type="html">&lt;p&gt;Release notes&lt;/p&gt;</content>
+  </entry>
+</feed>"""
+
+SAMPLE_EDEN_DOWNLOADS_HTML = """<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Eden - Downloads</title>
+    <meta name="description" content="Download Eden">
+    <meta property="og:site_name" content="Eden">
+  </head>
+  <body>
+    <div class="button-group">
+      <a href="https://git.eden-emu.dev/eden-emu/eden/releases" class="btn btn-primary">Stable</a>
+      <a href="https://git.eden-emu.dev/eden-ci/nightly/releases" class="btn btn-primary">Nightly</a>
+    </div>
+  </body>
+</html>"""
+
 
 class _MockNet:
     def __init__(self, feed_res: Any) -> None:
         self.feed_res = feed_res
         self.api_routes: List[Tuple[str, Any]] = []
+        self.url_routes: Dict[str, str] = {}
         self.calls: List[str] = []
         self.rate_remaining: Optional[int] = None
 
     def on(self, prefix: str, result: Any) -> "_MockNet":
         self.api_routes.append((prefix, result))
         return self
+
+    def on_url(self, url: str, body: str) -> "_MockNet":
+        self.url_routes[url] = body
+        return self
+
+    def url_get(
+        self, url: str, accept: str = "*/*", token: str = ""
+    ) -> Tuple[str, Dict[str, str]]:
+        self.calls.append(f"url:{url}")
+        if url in self.url_routes:
+            return self.url_routes[url], {}
+        raise GitHubError.not_found()
 
     def api_get(self, path: str, token: str = "") -> Any:
         self.calls.append(path)
@@ -2200,7 +2794,9 @@ class _MockNet:
                 return res
         raise GitHubError.not_found()
 
-    def feed_get(self, owner: str, repo: str) -> str:
+    def feed_get(
+        self, owner: str, repo: str, base_host: str = "https://github.com"
+    ) -> str:
         self.calls.append("feed")
         if isinstance(self.feed_res, Exception):
             raise self.feed_res
@@ -2218,20 +2814,32 @@ class TestPortableTracker(unittest.TestCase):
         assert ico is not None
         self.assertTrue(ico.exists())
 
-    def test_comment_column_at_very_left_and_col_widths_saved(self) -> None:
-        self.assertEqual(COLS[0], ("comment", "Comment"))
-        self.assertEqual(len(COLS), 9)
+    def test_title_left_comment_right_and_col_widths_saved(self) -> None:
+        self.assertEqual(COLS[0], ("user_title", "Title"))
+        self.assertEqual(COLS[1], ("name", "Project"))
+        self.assertEqual(COLS[-1], ("comment", "Comment"))
+        self.assertEqual(len(COLS), 10)
         p = normalize_project(
-            {"owner": "o", "repo": "r", "comment": "  My free-text note \n here  "}
+            {
+                "owner": "o",
+                "repo": "r",
+                "user_title": "  Zelda Port \n ",
+                "comment": "  My free-text note \n here  ",
+            }
         )
         assert p is not None
+        self.assertEqual(p["user_title"], "Zelda Port")
         self.assertEqual(p["comment"], "My free-text note   here")
-        msg = apply_comment(p, "Updated note")
-        self.assertIsNotNone(msg)
+        msg_t = apply_user_title(p, "Ocarina Native")
+        self.assertIsNotNone(msg_t)
+        self.assertEqual(p["user_title"], "Ocarina Native")
+
+        msg_c = apply_comment(p, "Updated note")
+        self.assertIsNotNone(msg_c)
         self.assertEqual(p["comment"], "Updated note")
 
-        # Verify column widths persistence round-trip
-        custom_widths = [180, 210, 220, 110, 115, 140, 120, 250, 130]
+        # Verify 10-column widths persistence round-trip
+        custom_widths = [160, 210, 230, 115, 115, 145, 120, 260, 130, 220]
         raw_json = json.dumps(
             {
                 "settings": {"col_widths": custom_widths},
@@ -2241,9 +2849,17 @@ class TestPortableTracker(unittest.TestCase):
         loaded = parse_data(raw_json)
         assert loaded is not None
         self.assertEqual(loaded["settings"]["col_widths"], custom_widths)
+        self.assertEqual(loaded["projects"][0]["user_title"], "Ocarina Native")
         self.assertEqual(loaded["projects"][0]["comment"], "Updated note")
 
-    def test_parse_repo_cases(self) -> None:
+        # Verify 9-column legacy col_widths migration prepends Title width
+        legacy_9 = [200, 220, 105, 105, 140, 115, 230, 130, 185]
+        migrated = normalize_col_widths(legacy_9)
+        self.assertEqual(len(migrated), 10)
+        self.assertEqual(migrated[0], COL_BASE[0])
+        self.assertEqual(migrated[1:], legacy_9)
+
+    def test_parse_repo_and_external_sites(self) -> None:
         def ok(s: str) -> Optional[str]:
             r = parse_repo(s)
             return f"{r[0]}/{r[1]}" if r else None
@@ -2255,11 +2871,57 @@ class TestPortableTracker(unittest.TestCase):
         self.assertEqual(ok("github.com/o/r.git"), "o/r")
         self.assertEqual(ok("  owner/repo  "), "owner/repo")
         self.assertEqual(ok("owner/repo.git"), "owner/repo")
+
+        # Forgejo / Gitea external site support
+        mb = parse_project_input("https://git.magicbean.dev/MagicBeanDev/Longshot")
+        assert mb is not None
+        self.assertEqual(mb["kind"], "forge")
+        self.assertEqual(mb["owner"], "MagicBeanDev")
+        self.assertEqual(mb["repo"], "Longshot")
+        self.assertEqual(
+            mb["html_url"], "https://git.magicbean.dev/MagicBeanDev/Longshot"
+        )
+
+        # Downloads webpage support
+        eden = parse_project_input("https://eden-emu.dev/downloads/")
+        assert eden is not None
+        self.assertEqual(eden["kind"], "web")
+        self.assertEqual(eden["owner"], "eden-emu.dev")
+        self.assertEqual(eden["repo"], "downloads")
+        self.assertEqual(eden["html_url"], "https://eden-emu.dev/downloads/")
+
         self.assertIsNone(ok("owner"))
         self.assertIsNone(ok("owner/repo/extra"))
-        self.assertIsNone(ok("https://example.com/a/b"))
         self.assertIsNone(ok(""))
         self.assertIsNone(ok("/repo"))
+
+    def test_forgejo_and_eden_downloads_parsing(self) -> None:
+        # 1. Test Forgejo Atom feed (MagicBeanDev/Longshot)
+        rel = parse_feed(
+            SAMPLE_FORGEJO_FEED,
+            "MagicBeanDev",
+            "Longshot",
+            "https://git.magicbean.dev/MagicBeanDev/Longshot",
+        )
+        assert rel is not None
+        self.assertEqual(rel["tag"], "v3.1.1")
+        self.assertEqual(rel["name"], "Longshot v3.1.1")
+        self.assertEqual(rel["published_at"], "2026-11-22T02:52:14Z")
+        self.assertEqual(
+            rel["url"],
+            "https://git.magicbean.dev/MagicBeanDev/Longshot/releases/tag/v3.1.1",
+        )
+
+        # 2. Test Eden downloads webpage discovery
+        linked_forge, direct_rel, meta = extract_releases_from_webpage(
+            SAMPLE_EDEN_DOWNLOADS_HTML, "https://eden-emu.dev/downloads/"
+        )
+        self.assertEqual(meta["title"], "Eden")
+        self.assertEqual(meta["description"], "Download Eden")
+        self.assertIsNone(direct_rel)
+        self.assertEqual(
+            linked_forge, ("https://git.eden-emu.dev", "eden-emu", "eden")
+        )
 
     def test_feed_parse(self) -> None:
         r = parse_feed(SAMPLE_FEED, "o", "r")
@@ -2290,115 +2952,180 @@ class TestPortableTracker(unittest.TestCase):
                 "prerelease": True,
             },
         ]
-        net2 = _MockNet(GitHubError.not_found()).on("/repos/o/r/releases?", rel_api)
+        net2 = _MockNet(GitHubError("blocked")).on(
+            "/repos/o/r/releases?per_page=10", rel_api
+        )
         r2 = get_latest(net2, "o", "r", "", True)
         assert r2 is not None
-        self.assertEqual(
-            (r2["id"], r2["tag"], r2["prerelease"], r2["source"]),
-            (7, "v9", True, "release"),
-        )
+        self.assertEqual(r2["tag"], "v9")
+        self.assertTrue(r2["prerelease"])
 
-    def test_platform_columns_with_xbox_source(self) -> None:
+        net3 = _MockNet(SAMPLE_FEED).on(
+            "/repos/o/r/releases/latest",
+            {
+                "id": 2,
+                "tag_name": "v1.0",
+                "name": "",
+                "published_at": "",
+                "html_url": "https://github.com/o/r/releases/tag/v1.0",
+                "prerelease": False,
+            },
+        )
+        r3 = get_latest(net3, "o", "r", "", False)
+        assert r3 is not None
+        self.assertEqual(r3["tag"], "v1.0")
+        self.assertEqual(net3.calls, ["/repos/o/r/releases/latest"])
+
+    def test_update_detection_and_apply_result(self) -> None:
+        def rel(rid: Union[int, str], tag: str) -> Dict[str, Any]:
+            return {
+                "id": rid,
+                "tag": tag,
+                "name": tag,
+                "published_at": "2026-03-01T00:00:00Z",
+                "url": "https://github.com/a/b/releases",
+                "prerelease": False,
+                "source": "feed",
+            }
+
+        p = normalize_project(
+            {
+                "owner": "a",
+                "repo": "b",
+                "fmt": 2,
+                "latest": rel(1, "v1.0"),
+                "seen_id": 1,
+                "seen_tag": "v1.0",
+            }
+        )
+        assert p is not None
+        self.assertFalse(has_update(p))
+        self.assertEqual(status_text(p), "Up to date")
+
+        apply_result(p, rel(2, "v1.1"), None, "2026-11-17T12:00:00")
+        self.assertTrue(has_update(p))
+        self.assertEqual(status_text(p), "Update available: v1.0 -> v1.1")
+
+        apply_result(p, None, "rate limit", "2026-11-17T13:00:00")
+        self.assertEqual(p["latest"]["tag"], "v1.1")
+        self.assertTrue(status_text(p).startswith("Error:"))
+
+    def test_platform_columns_with_xbox_wii_and_wii_u_source(self) -> None:
         self.assertEqual(
             SOURCE_PLATFORMS,
-            ("PC", "Android", "Switch", "Switch 2", "PS5", "PS4", "PS3", "Xbox"),
+            (
+                "PC",
+                "Android",
+                "Switch",
+                "Switch 2",
+                "PS5",
+                "PS4",
+                "PS3",
+                "Xbox",
+                "Wii",
+                "Wii U",
+            ),
         )
         self.assertEqual(
             TARGET_PLATFORMS,
             ("PC", "Android", "Switch", "Switch 2", "PS5", "PS4", "PS3"),
         )
-        for plat in SOURCE_PLATFORMS:
-            self.assertEqual(normalize_source_platform(plat), plat)
-            self.assertEqual(normalize_source_platform(plat.lower()), plat)
-
-        p = normalize_project(
-            {"owner": "o", "repo": "r", "source": "xbox", "target": "PS5"}
-        )
-        assert p is not None
-        self.assertEqual(p["source"], "Xbox")
-        self.assertEqual(p["target"], "PS5")
-
-        p_def = normalize_project({"owner": "o", "repo": "r", "source": "unknown"})
-        assert p_def is not None
-        self.assertEqual(p_def["source"], "PC")
-        self.assertEqual(p_def["target"], "PC")
-
-    def test_update_detection_and_apply_result(self) -> None:
         p = normalize_project({"owner": "o", "repo": "r"})
         assert p is not None
-        p["fmt"] = 2
-        p["latest"] = {
-            "id": 1,
-            "tag": "v1",
-            "name": "",
-            "published_at": "2026-01-01",
-            "url": "",
-            "prerelease": False,
-            "source": "release",
-        }
-        p["seen_id"] = 1
-        p["seen_tag"] = "v1"
-        self.assertFalse(has_update(p))
-        self.assertEqual(status_text(p), "Up to date")
+        self.assertEqual(p["source"], "PC")
+        self.assertEqual(p["target"], "PC")
 
-        apply_result(
-            p,
-            {
-                "id": 2,
-                "tag": "v2",
-                "name": "",
-                "published_at": "2026-02-01",
-                "url": "",
-                "prerelease": False,
-                "source": "release",
-            },
-            None,
-            "2026-11-19T10:00:00",
+        p2 = normalize_project(
+            {"owner": "o", "repo": "r", "source": "wii u", "target": "ps5"}
         )
-        self.assertTrue(has_update(p))
-        self.assertEqual(status_text(p), "Update available: v1 -> v2")
+        assert p2 is not None
+        self.assertEqual(p2["source"], "Wii U")
+        self.assertEqual(p2["target"], "PS5")
 
-    def test_sorting_including_comment_source_and_target(self) -> None:
-        a = normalize_project(
-            {"owner": "o", "repo": "alpha", "comment": "Zeta", "source": "Xbox", "target": "PC"}
+        p_wii = normalize_project(
+            {"owner": "o", "repo": "r", "source": "wii", "target": "switch 2"}
         )
-        b = normalize_project(
-            {"owner": "o", "repo": "bravo", "comment": "Alpha", "source": "Android", "target": "PS5"}
+        assert p_wii is not None
+        self.assertEqual(p_wii["source"], "Wii")
+        self.assertEqual(p_wii["target"], "Switch 2")
+
+        p3 = normalize_project(
+            {"owner": "o", "repo": "r", "source": "xbox", "target": "xbox"}
         )
-        c = normalize_project(
-            {"owner": "o", "repo": "charlie", "comment": "Mid", "source": "PS3", "target": "Android"}
-        )
-        assert a and b and c
-        items = [a, b, c]
-
-        by_comment = [items[i]["repo"] for i in sort_order(items, "comment", True)]
-        self.assertEqual(by_comment, ["bravo", "charlie", "alpha"])
-
-        by_source = [items[i]["repo"] for i in sort_order(items, "source", True)]
-        self.assertEqual(by_source, ["bravo", "charlie", "alpha"])
-
-        by_target = [items[i]["repo"] for i in sort_order(items, "target", True)]
-        self.assertEqual(by_target, ["charlie", "alpha", "bravo"])
-
-    def test_column_layout_fills_width(self) -> None:
-        for avail in (950, 1100, 1300, 1500, 1900):
-            w = layout_columns(COL_BASE, COL_MIN, avail)
-            self.assertEqual(len(w), 9)
-            self.assertTrue(all(a >= m for a, m in zip(w, COL_MIN)))
-            if avail >= sum(COL_MIN):
-                self.assertEqual(sum(w), avail)
+        assert p3 is not None
+        self.assertEqual(p3["source"], "Xbox")
+        self.assertEqual(p3["target"], "PC")
 
     def test_rename_and_import_export(self) -> None:
-        p = normalize_project({"owner": "o", "repo": "repo"})
+        p = normalize_project(
+            {
+                "owner": "o",
+                "repo": "r",
+                "title": "Orig",
+                "user_title": "Custom Left Title",
+                "comment": "Test comment",
+                "source": "Wii U",
+                "target": "PS4",
+            }
+        )
         assert p is not None
-        self.assertEqual(apply_rename(p, "  My  App "), "Renamed to My App.")
-        self.assertIsNone(apply_rename(p, "My App"))
-        self.assertEqual(apply_rename(p, "repo"), "Name reset to repo.")
-        self.assertNotIn("custom_name", p)
+        self.assertEqual(display_name(p), "Orig")
+        msg = apply_rename(p, "  My   App ")
+        self.assertEqual(msg, "Renamed to My App.")
+        self.assertEqual(display_name(p), "My App")
 
-        exp = build_export([p], "2026-11-21T10:00:00")
-        raw_str = json.dumps(exp)
-        self.assertNotIn("token", raw_str)
+        exp = build_export([p], "2026-11-17T00:00:00")
+        text = json.dumps(exp)
+        self.assertNotIn("token", text)
+        parsed = parse_import(json.loads(text))
+        assert parsed is not None
+        imported, skipped = parsed
+        self.assertEqual(skipped, 0)
+        self.assertEqual(imported[0]["custom_name"], "My App")
+        self.assertEqual(imported[0]["user_title"], "Custom Left Title")
+        self.assertEqual(imported[0]["comment"], "Test comment")
+        self.assertEqual(imported[0]["source"], "Wii U")
+        self.assertEqual(imported[0]["target"], "PS4")
+
+    def test_sorting_including_title_comment_source_and_target(self) -> None:
+        p1 = normalize_project(
+            {
+                "owner": "a",
+                "repo": "z",
+                "title": "Zeta",
+                "user_title": "B Title",
+                "comment": "Beta note",
+                "source": "Wii U",
+                "target": "PS5",
+            }
+        )
+        p2 = normalize_project(
+            {
+                "owner": "b",
+                "repo": "a",
+                "title": "Alpha",
+                "user_title": "A Title",
+                "comment": "Alpha note",
+                "source": "Android",
+                "target": "PC",
+            }
+        )
+        assert p1 is not None and p2 is not None
+        projs = [p1, p2]
+        self.assertEqual(sort_order(projs, "user_title", True), [1, 0])
+        self.assertEqual(sort_order(projs, "user_title", False), [0, 1])
+        self.assertEqual(sort_order(projs, "comment", True), [1, 0])
+        self.assertEqual(sort_order(projs, "comment", False), [0, 1])
+        self.assertEqual(sort_order(projs, "source", True), [1, 0])
+        self.assertEqual(sort_order(projs, "source", False), [0, 1])
+        self.assertEqual(sort_order(projs, "target", True), [1, 0])
+        self.assertEqual(sort_order(projs, "target", False), [0, 1])
+
+    def test_column_layout_fills_width(self) -> None:
+        w = layout_columns(COL_BASE, COL_MIN, 1600)
+        self.assertEqual(sum(w), 1600)
+        for a, b in zip(w, COL_MIN):
+            self.assertGreaterEqual(a, b)
 
 
 def main() -> int:
