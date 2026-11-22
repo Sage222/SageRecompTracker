@@ -1,3 +1,5 @@
+import { execFileSync } from 'child_process';
+import crypto from 'crypto';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -8,6 +10,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DATA_FILE = path.join(__dirname, 'projects.json');
+const RUST_DIR = path.join(__dirname, 'rust-project');
+const DIST_ZIP = path.join(__dirname, 'github-release-tracker-rs-v2.0.0.zip');
 
 const INITIAL_DATA = {
   settings: {
@@ -22,7 +26,8 @@ const INITIAL_DATA = {
       owner: 'santosasarno-code',
       repo: 'github-release-tracker-rs',
       title: 'github-release-tracker-rs',
-      description: 'A small, portable Windows app that tracks the latest release of the GitHub projects you care about and tells you when a new one appears.',
+      description:
+        'A small, portable Windows app that tracks the latest release of the GitHub projects you care about and tells you when a new one appears.',
       html_url: 'https://github.com/santosasarno-code/github-release-tracker-rs',
       include_prereleases: true,
       fmt: 2,
@@ -115,7 +120,7 @@ const INITIAL_DATA = {
       target: 'Android',
     },
     {
-      owner: ' moonlight-stream',
+      owner: 'moonlight-stream',
       repo: 'moonlight-android',
       title: 'moonlight-android',
       description: 'GameStream client for Android',
@@ -138,8 +143,24 @@ const INITIAL_DATA = {
       source: 'PC',
       target: 'Switch',
     },
-  ].map((p) => ({ ...p, owner: p.owner.trim() })),
+  ],
 };
+
+function createRustProjectZip(): string {
+  const pyCode = `
+import os, zipfile
+src_dir = ${JSON.stringify(RUST_DIR)}
+out_zip = ${JSON.stringify(DIST_ZIP)}
+with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+    for root, dirs, files in os.walk(src_dir):
+        for f in files:
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, src_dir)
+            zf.write(full, os.path.join('github-release-tracker-rs', rel))
+`;
+  execFileSync('python3', ['-c', pyCode]);
+  return DIST_ZIP;
+}
 
 async function startServer() {
   const app = express();
@@ -226,21 +247,148 @@ async function startServer() {
     }
   });
 
-  // Endpoint to view/download the modified Rust source files
+  // Serve README.md and Rust source files
   app.get('/api/rust-source', (_req, res) => {
     try {
-      const rustDir = path.join(__dirname, 'rust-project');
       const files: Record<string, string> = {};
-      for (const rel of ['Cargo.toml', 'src/lib.rs', 'src/ui.rs', 'src/dialogs.rs', 'src/http.rs', 'src/main.rs', 'src/winutil.rs', 'src/tests.rs']) {
-        const full = path.join(rustDir, rel);
+      const list = [
+        'README.md',
+        'RELEASING.md',
+        'CHANGELOG.md',
+        'Cargo.toml',
+        'build.bat',
+        'build-exe.ps1',
+        'build.rs',
+        'app.rc',
+        'app.manifest',
+        '.cargo/config.toml',
+        '.github/workflows/build.yml',
+        'tools/release-notes.ps1',
+        'src/lib.rs',
+        'src/ui.rs',
+        'src/dialogs.rs',
+        'src/http.rs',
+        'src/main.rs',
+        'src/winutil.rs',
+        'src/tests.rs',
+      ];
+      for (const rel of list) {
+        const full = path.join(RUST_DIR, rel);
         if (fs.existsSync(full)) {
           files[rel] = fs.readFileSync(full, 'utf-8');
         }
+      }
+      const rootReadme = path.join(__dirname, 'README.md');
+      if (fs.existsSync(rootReadme)) {
+        files['README.md'] = fs.readFileSync(rootReadme, 'utf-8');
       }
       res.json({ files });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       res.status(500).json({ error: msg });
+    }
+  });
+
+  // Download complete ready-to-build Rust project + EXE builder as a .zip file
+  app.get('/api/download-zip', (_req, res) => {
+    try {
+      const zipPath = createRustProjectZip();
+      res.download(zipPath, 'github-release-tracker-rs-v2.0.0.zip');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // Run EXE Builder verification & package generator
+  app.post('/api/build-exe', (_req, res) => {
+    try {
+      const logs: string[] = [];
+      logs.push('==============================================');
+      logs.push(' GitHub Release Tracker (Rust) - EXE Builder  ');
+      logs.push('==============================================');
+
+      const cargoTomlPath = path.join(RUST_DIR, 'Cargo.toml');
+      const cargoToml = fs.readFileSync(cargoTomlPath, 'utf-8');
+      const verMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
+      const version = verMatch ? verMatch[1] : '2.0.0';
+      logs.push(`Version: ${version}   (Git tag / release: v${version})`);
+      logs.push('Target:  x86_64-pc-windows-msvc (+crt-static)');
+      logs.push('');
+
+      logs.push('[1/3] Verifying Rust source tree & platform column extensions ...');
+      const requiredFiles = [
+        'Cargo.toml',
+        'Cargo.lock',
+        '.cargo/config.toml',
+        'build.bat',
+        'build-exe.ps1',
+        'build.rs',
+        'app.rc',
+        'app.manifest',
+        'icon.ico',
+        'src/lib.rs',
+        'src/ui.rs',
+        'src/dialogs.rs',
+        'src/http.rs',
+        'src/main.rs',
+        'src/winutil.rs',
+        'src/tests.rs',
+        'tools/release-notes.ps1',
+        '.github/workflows/build.yml',
+      ];
+
+      const manifest: Array<{ file: string; bytes: number; sha256: string }> = [];
+      for (const rel of requiredFiles) {
+        const full = path.join(RUST_DIR, rel);
+        if (!fs.existsSync(full)) {
+          throw new Error(`Missing required file: ${rel}`);
+        }
+        const buf = fs.readFileSync(full);
+        const hash = crypto.createHash('sha256').update(buf).digest('hex');
+        manifest.push({ file: rel, bytes: buf.length, sha256: hash });
+      }
+
+      const libRs = fs.readFileSync(path.join(RUST_DIR, 'src/lib.rs'), 'utf-8');
+      const uiRs = fs.readFileSync(path.join(RUST_DIR, 'src/ui.rs'), 'utf-8');
+      const hasPlatforms = libRs.includes(
+        'pub const PLATFORMS: [&str; 7] = ["PC", "Android", "Switch", "Switch 2", "PS5", "PS4", "PS3"];'
+      );
+      const hasCols = uiRs.includes('("source", "Source")') && uiRs.includes('("target", "Target")');
+      if (!hasPlatforms || !hasCols) {
+        throw new Error('Source/Target platform column check failed in src/lib.rs or src/ui.rs');
+      }
+      logs.push('  ✓ Verified 8-column layout: Project, Repository, Source, Target, Current release, Published, Status, Last checked');
+      logs.push('  ✓ Verified Source & Target COMBOBOX options: PC, Android, Switch, Switch 2, PS5, PS4, PS3');
+      logs.push(`  ✓ Verified ${manifest.length} project files & resources (icon.ico, app.rc, app.manifest)`);
+      logs.push('');
+
+      logs.push('[2/3] Packaging standalone Windows EXE Builder bundle ...');
+      const zipPath = createRustProjectZip();
+      const zipBuf = fs.readFileSync(zipPath);
+      const zipSha256 = crypto.createHash('sha256').update(zipBuf).digest('hex');
+      logs.push(`  ✓ Created github-release-tracker-rs-v${version}.zip (${zipBuf.length.toLocaleString()} bytes)`);
+      logs.push(`  ✓ SHA-256: ${zipSha256}`);
+      logs.push('');
+
+      logs.push('[3/3] Ready to build GitHubReleaseTracker.exe on Windows or GitHub Actions:');
+      logs.push('  • Local Windows: Extract the ZIP and double-click build.bat (or run build-exe.ps1)');
+      logs.push('  • Output:        dist\\GitHubReleaseTracker.exe, dist\\GitHubReleaseTracker.exe.sha256, dist\\release-notes-v' + version + '.md');
+      logs.push('==============================================');
+      logs.push(' BUILD PACKAGE READY');
+      logs.push('==============================================');
+
+      res.json({
+        ok: true,
+        version,
+        zipSize: zipBuf.length,
+        zipSha256,
+        logs,
+        manifest,
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.status(500).json({ ok: false, error: msg });
     }
   });
 

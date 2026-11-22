@@ -3,6 +3,8 @@ import {
   CheckSquare,
   Download,
   ExternalLink,
+  FileText,
+  Hammer,
   Moon,
   Pencil,
   Plus,
@@ -120,7 +122,8 @@ type ModalState =
   | { type: 'confirm_remove'; count: number; names: string; keys: string[] }
   | { type: 'confirm_import'; projects: Project[]; skipped: number }
   | { type: 'settings' }
-  | { type: 'about'; fromSettings?: boolean };
+  | { type: 'about'; fromSettings?: boolean }
+  | { type: 'exe_builder'; initialTab?: 'builder' | 'readme' | 'source' };
 
 interface ContextMenuState {
   x: number;
@@ -170,6 +173,19 @@ export default function App() {
   // Settings form state
   const [settingsToken, setSettingsToken] = useState('');
   const [settingsCheckOnLaunch, setSettingsCheckOnLaunch] = useState(false);
+
+  // EXE Builder & README state
+  const [builderTab, setBuilderTab] = useState<'builder' | 'readme' | 'source'>('builder');
+  const [builderRunning, setBuilderRunning] = useState(false);
+  const [builderResult, setBuilderResult] = useState<{
+    version: string;
+    zipSize: number;
+    zipSha256: string;
+    logs: string[];
+    manifest: Array<{ file: string; bytes: number; sha256: string }>;
+  } | null>(null);
+  const [rustFiles, setRustFiles] = useState<Record<string, string>>({});
+  const [selectedSourceFile, setSelectedSourceFile] = useState<string>('build.bat');
 
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -885,27 +901,63 @@ export default function App() {
     }
   };
 
-  // Download modified Rust source code bundle as JSON/text
-  const handleDownloadRustSource = async () => {
+  // Download ready-to-build ZIP package
+  const handleDownloadZip = () => {
+    const a = document.createElement('a');
+    a.href = '/api/download-zip';
+    a.download = `github-release-tracker-rs-v${APP_VERSION}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setStatusMsg(`Downloading github-release-tracker-rs-v${APP_VERSION}.zip ...`);
+  };
+
+  // Download single file from rustFiles
+  const handleDownloadSingleFile = (filename: string, content: string) => {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename.split('/').pop() || filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setStatusMsg(`Downloaded ${filename}.`);
+  };
+
+  // Run EXE Builder verification & packaging
+  const handleRunExeBuilder = useCallback(async () => {
+    setBuilderRunning(true);
     try {
-      const res = await fetch('/api/rust-source');
-      if (!res.ok) return;
-      const payload = await res.json();
-      const blob = new Blob([JSON.stringify(payload.files, null, 2)], {
-        type: 'application/json',
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'github-release-tracker-rs-modified-source.json';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      setStatusMsg('Downloaded modified Rust source files.');
+      const [buildRes, srcRes] = await Promise.all([
+        fetch('/api/build-exe', { method: 'POST' }),
+        fetch('/api/rust-source'),
+      ]);
+      if (buildRes.ok) {
+        const bJson = await buildRes.json();
+        if (bJson.ok) {
+          setBuilderResult(bJson);
+          setStatusMsg(`EXE Builder package ready (v${bJson.version}, SHA-256: ${bJson.zipSha256.slice(0, 12)}...).`);
+        }
+      }
+      if (srcRes.ok) {
+        const sJson = await srcRes.json();
+        if (sJson.files) {
+          setRustFiles(sJson.files);
+        }
+      }
     } catch {
       // ignore
+    } finally {
+      setBuilderRunning(false);
     }
+  }, []);
+
+  const openExeBuilderModal = (tab: 'builder' | 'readme' | 'source' = 'builder') => {
+    setBuilderTab(tab);
+    setModal({ type: 'exe_builder', initialTab: tab });
+    handleRunExeBuilder();
   };
 
   // Keyboard shortcuts on list view (Delete, F2)
@@ -1078,6 +1130,18 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-[8px]">
+          <WinButton
+            onClick={() => openExeBuilderModal('readme')}
+            icon={<FileText size={14} />}
+            label="README.md"
+            title="View README.md"
+          />
+          <WinButton
+            onClick={() => openExeBuilderModal('builder')}
+            icon={<Hammer size={14} />}
+            label="Build .exe"
+            title="Open Windows EXE Builder"
+          />
           <WinButton
             onClick={() => fileInputRef.current?.click()}
             icon={<Download size={14} />}
@@ -1751,7 +1815,7 @@ export default function App() {
                 <div className="flex items-center justify-between pt-2">
                   <button
                     type="button"
-                    onClick={handleDownloadRustSource}
+                    onClick={() => openExeBuilderModal('builder')}
                     style={{
                       backgroundColor: pal.btn_bg,
                       color: pal.fg,
@@ -1760,7 +1824,7 @@ export default function App() {
                     }}
                     className="px-3 rounded-[4px] border text-[12px] cursor-pointer"
                   >
-                    Download Rust source (.rs)
+                    Open EXE Builder (.zip / .bat)
                   </button>
 
                   <div className="flex items-center gap-2">
@@ -1991,6 +2055,382 @@ export default function App() {
                     Cancel
                   </button>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* EXE Builder & README.md Modal */}
+          {modal.type === 'exe_builder' && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                backgroundColor: pal.bg,
+                color: pal.fg,
+                borderColor: pal.border,
+                width: 780,
+                maxWidth: '95vw',
+                maxHeight: '88vh',
+              }}
+              className="border rounded-[6px] shadow-2xl overflow-hidden flex flex-col"
+            >
+              {/* Title bar */}
+              <div
+                style={{ backgroundColor: pal.head_bg, borderBottom: `1px solid ${pal.line}` }}
+                className="px-3.5 py-2 flex items-center justify-between text-[13px] font-semibold shrink-0"
+              >
+                <span>{`${APP_NAME} v${APP_VERSION} — EXE Builder & README.md`}</span>
+                <button
+                  type="button"
+                  onClick={() => setModal({ type: 'none' })}
+                  className="opacity-70 hover:opacity-100 cursor-pointer px-1"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Tabs bar */}
+              <div
+                style={{ borderBottom: `1px solid ${pal.line}`, backgroundColor: pal.head_bg }}
+                className="flex items-center gap-1 px-3 pt-1.5 shrink-0"
+              >
+                {(
+                  [
+                    { id: 'builder', label: 'EXE Builder (build.bat / .zip)' },
+                    { id: 'readme', label: 'README.md' },
+                    { id: 'source', label: 'Rust Source & Build Scripts' },
+                  ] as const
+                ).map((t) => {
+                  const active = builderTab === t.id;
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setBuilderTab(t.id)}
+                      style={{
+                        backgroundColor: active ? pal.bg : 'transparent',
+                        color: pal.fg,
+                        borderColor: active ? pal.line : 'transparent',
+                        borderBottomColor: active ? pal.bg : 'transparent',
+                      }}
+                      className="px-3 py-1.5 text-[12px] font-medium rounded-t-[4px] border cursor-pointer"
+                    >
+                      {t.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Tab Content */}
+              <div className="p-4 overflow-y-auto flex-1 flex flex-col gap-3">
+                {builderTab === 'builder' && (
+                  <>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-[14px] font-bold">
+                          Windows Portable Executable Builder (`dist\GitHubReleaseTracker.exe`)
+                        </div>
+                        <div style={{ color: pal.sub_fg }} className="text-[12px] mt-0.5">
+                          Includes configurable Source &amp; Target columns (PC, Android, Switch,
+                          Switch 2, PS5, PS4, PS3), static CRT linking, and Win32 DPI manifest.
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleRunExeBuilder}
+                          disabled={builderRunning}
+                          style={{
+                            backgroundColor: pal.btn_bg,
+                            color: pal.fg,
+                            borderColor: pal.border,
+                            height: 28,
+                          }}
+                          className="px-3 rounded-[4px] border text-[12px] inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <RefreshCw size={12} className={builderRunning ? 'animate-spin' : ''} />
+                          <span>Re-verify &amp; Build Package</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDownloadZip}
+                          style={{
+                            backgroundColor: pal.sel_bg,
+                            color: pal.sel_fg,
+                            borderColor: pal.sel_bg,
+                            height: 28,
+                          }}
+                          className="px-3 rounded-[4px] border text-[12px] font-medium inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Download size={13} />
+                          <span>Download Project &amp; EXE Builder (.zip)</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Quick script download buttons */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {rustFiles['build.bat'] && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleDownloadSingleFile('build.bat', rustFiles['build.bat'])
+                          }
+                          style={{
+                            backgroundColor: pal.btn_bg,
+                            color: pal.fg,
+                            borderColor: pal.border,
+                            height: 26,
+                          }}
+                          className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
+                        >
+                          Download build.bat
+                        </button>
+                      )}
+                      {rustFiles['build-exe.ps1'] && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleDownloadSingleFile('build-exe.ps1', rustFiles['build-exe.ps1'])
+                          }
+                          style={{
+                            backgroundColor: pal.btn_bg,
+                            color: pal.fg,
+                            borderColor: pal.border,
+                            height: 26,
+                          }}
+                          className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
+                        >
+                          Download build-exe.ps1
+                        </button>
+                      )}
+                      {rustFiles['README.md'] && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleDownloadSingleFile('README.md', rustFiles['README.md'])
+                          }
+                          style={{
+                            backgroundColor: pal.btn_bg,
+                            color: pal.fg,
+                            borderColor: pal.border,
+                            height: 26,
+                          }}
+                          className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
+                        >
+                          Download README.md
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Console Output */}
+                    <div>
+                      <div className="text-[12px] font-semibold mb-1">EXE Builder Output Log:</div>
+                      <pre
+                        style={{
+                          backgroundColor: pal.field,
+                          color: pal.fg,
+                          borderColor: pal.border,
+                        }}
+                        className="p-3 rounded-[4px] border font-mono text-[11.5px] leading-relaxed overflow-x-auto select-text whitespace-pre-wrap max-h-[210px] overflow-y-auto"
+                      >
+                        {builderRunning
+                          ? 'Running EXE Builder verification and packaging ...'
+                          : builderResult
+                            ? builderResult.logs.join('\n')
+                            : 'Click "Re-verify & Build Package" to run.'}
+                      </pre>
+                    </div>
+
+                    {/* File Manifest Table */}
+                    {builderResult && (
+                      <div>
+                        <div className="text-[12px] font-semibold mb-1">
+                          Verified Source &amp; Resource Manifest ({builderResult.manifest.length}{' '}
+                          files):
+                        </div>
+                        <div
+                          style={{
+                            backgroundColor: pal.field,
+                            borderColor: pal.border,
+                          }}
+                          className="border rounded-[4px] max-h-[140px] overflow-y-auto text-[11.5px] font-mono tabular-nums"
+                        >
+                          {builderResult.manifest.map((item) => (
+                            <div
+                              key={item.file}
+                              style={{ borderBottom: `1px solid ${pal.line}` }}
+                              className="flex items-center justify-between px-2.5 py-1 gap-4"
+                            >
+                              <span className="font-semibold">{item.file}</span>
+                              <span style={{ color: pal.sub_fg }} className="truncate">
+                                {item.sha256.slice(0, 16)}... ({item.bytes.toLocaleString()} B)
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {builderTab === 'readme' && (
+                  <div className="flex flex-col gap-2 flex-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[13px] font-bold">README.md</span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (rustFiles['README.md']) {
+                              navigator.clipboard?.writeText(rustFiles['README.md']);
+                              setStatusMsg('Copied README.md to clipboard.');
+                            }
+                          }}
+                          style={{
+                            backgroundColor: pal.btn_bg,
+                            color: pal.fg,
+                            borderColor: pal.border,
+                            height: 26,
+                          }}
+                          className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
+                        >
+                          Copy README.md
+                        </button>
+                        {rustFiles['README.md'] && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleDownloadSingleFile('README.md', rustFiles['README.md'])
+                            }
+                            style={{
+                              backgroundColor: pal.sel_bg,
+                              color: pal.sel_fg,
+                              borderColor: pal.sel_bg,
+                              height: 26,
+                            }}
+                            className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
+                          >
+                            Download README.md
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <pre
+                      style={{
+                        backgroundColor: pal.field,
+                        color: pal.fg,
+                        borderColor: pal.border,
+                      }}
+                      className="p-3 rounded-[4px] border font-mono text-[12px] leading-relaxed overflow-auto select-text whitespace-pre-wrap max-h-[380px]"
+                    >
+                      {rustFiles['README.md'] || 'Loading README.md ...'}
+                    </pre>
+                  </div>
+                )}
+
+                {builderTab === 'source' && (
+                  <div className="flex flex-col gap-2 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[12px] font-semibold">File:</span>
+                        <select
+                          value={selectedSourceFile}
+                          onChange={(e) => setSelectedSourceFile(e.target.value)}
+                          style={{
+                            backgroundColor: pal.field,
+                            color: pal.fg,
+                            borderColor: pal.border,
+                          }}
+                          className="h-[26px] px-2 rounded-[4px] border text-[12px] outline-none cursor-pointer"
+                        >
+                          {Object.keys(rustFiles).map((k) => (
+                            <option
+                              key={k}
+                              value={k}
+                              style={{ backgroundColor: pal.field, color: pal.fg }}
+                            >
+                              {k}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const txt = rustFiles[selectedSourceFile] || '';
+                            navigator.clipboard?.writeText(txt);
+                            setStatusMsg(`Copied ${selectedSourceFile} to clipboard.`);
+                          }}
+                          style={{
+                            backgroundColor: pal.btn_bg,
+                            color: pal.fg,
+                            borderColor: pal.border,
+                            height: 26,
+                          }}
+                          className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
+                        >
+                          Copy file
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleDownloadSingleFile(
+                              selectedSourceFile,
+                              rustFiles[selectedSourceFile] || ''
+                            )
+                          }
+                          style={{
+                            backgroundColor: pal.sel_bg,
+                            color: pal.sel_fg,
+                            borderColor: pal.sel_bg,
+                            height: 26,
+                          }}
+                          className="px-2.5 rounded-[4px] border text-[12px] cursor-pointer"
+                        >
+                          Download file
+                        </button>
+                      </div>
+                    </div>
+
+                    <pre
+                      style={{
+                        backgroundColor: pal.field,
+                        color: pal.fg,
+                        borderColor: pal.border,
+                      }}
+                      className="p-3 rounded-[4px] border font-mono text-[11.5px] leading-relaxed overflow-auto select-text whitespace-pre max-h-[380px]"
+                    >
+                      {rustFiles[selectedSourceFile] || 'Loading ...'}
+                    </pre>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div
+                style={{ borderTop: `1px solid ${pal.line}`, backgroundColor: pal.head_bg }}
+                className="px-4 py-2 flex items-center justify-between shrink-0"
+              >
+                <span style={{ color: pal.sub_fg }} className="text-[12px]">
+                  Extract the ZIP and double-click build.bat (or run build-exe.ps1) on Windows 10/11.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setModal({ type: 'none' })}
+                  style={{
+                    backgroundColor: pal.btn_bg,
+                    color: pal.fg,
+                    borderColor: pal.border,
+                    width: 84,
+                    height: 28,
+                  }}
+                  className="rounded-[4px] border text-[13px] cursor-pointer"
+                >
+                  Close
+                </button>
               </div>
             </div>
           )}
