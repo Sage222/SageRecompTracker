@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowLeftRight,
   CheckSquare,
   Download,
   ExternalLink,
@@ -20,6 +21,7 @@ import {
   COL_BASE,
   COL_MIN,
   COLS,
+  DEFAULT_COL_ORDER,
   MAX_COMMENT_LEN,
   MAX_CUSTOM_NAME,
   MAX_IMPORT_BYTES,
@@ -47,6 +49,7 @@ import {
   GitHubError,
   hasUpdate,
   mergeProjects,
+  normalizeColOrder,
   normalizeColWidths,
   normalizeProject,
   normalizeSourcePlatform,
@@ -129,6 +132,7 @@ type ModalState =
   | { type: 'message'; title: string; text: string; icon: 'error' | 'info' }
   | { type: 'confirm_remove'; count: number; names: string; keys: string[] }
   | { type: 'confirm_import'; projects: Project[]; skipped: number }
+  | { type: 'column_order' }
   | { type: 'settings' }
   | { type: 'about'; fromSettings?: boolean }
   | { type: 'exe_builder'; initialTab?: 'builder' | 'readme' | 'source' };
@@ -136,7 +140,8 @@ type ModalState =
 interface ContextMenuState {
   x: number;
   y: number;
-  kind: 'row' | 'status';
+  kind: 'row' | 'status' | 'header';
+  colId?: string;
 }
 
 const STORAGE_KEY = 'github_release_tracker_projects_json_v3';
@@ -160,6 +165,7 @@ export default function App() {
       sort_col: '',
       sort_asc: true,
       col_widths: [...COL_BASE],
+      col_order: [...DEFAULT_COL_ORDER],
     },
     projects: [],
   });
@@ -177,6 +183,10 @@ export default function App() {
   const [colBase, setColBase] = useState<number[]>(() => [...COL_BASE]);
   const [modal, setModal] = useState<ModalState>({ type: 'none' });
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [draggingColId, setDraggingColId] = useState<string | null>(null);
+  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
+  const [dialogColOrder, setDialogColOrder] = useState<string[]>(() => [...DEFAULT_COL_ORDER]);
+  const [dialogSelectedColId, setDialogSelectedColId] = useState<string>(DEFAULT_COL_ORDER[0]);
 
   // Settings form state
   const [settingsToken, setSettingsToken] = useState('');
@@ -256,6 +266,7 @@ export default function App() {
                     : '',
                 sort_asc: obj.settings?.sort_asc !== false,
                 col_widths: normalizeColWidths(obj.settings?.col_widths),
+                col_order: normalizeColOrder(obj.settings?.col_order),
               },
               projects: imported.projects,
             };
@@ -287,6 +298,7 @@ export default function App() {
                       : '',
                   sort_asc: obj.settings?.sort_asc !== false,
                   col_widths: normalizeColWidths(obj.settings?.col_widths),
+                  col_order: normalizeColOrder(obj.settings?.col_order),
                 },
                 projects: imported.projects,
               };
@@ -319,8 +331,58 @@ export default function App() {
     };
   }, []);
 
-  // Use exact saved pixel column widths so user resizing persists without proportional rescaling
+  // Use exact saved pixel column widths and column order
   const colWidths = useMemo(() => normalizeColWidths(colBase), [colBase]);
+  const colOrder = useMemo(
+    () => normalizeColOrder(data.settings.col_order),
+    [data.settings.col_order]
+  );
+
+  const applyNewColOrder = useCallback(
+    (nextOrderRaw: string[], statusTextMsg?: string) => {
+      const normalized = normalizeColOrder(nextOrderRaw);
+      setData((prev) => {
+        const next: TrackerData = {
+          ...prev,
+          settings: {
+            ...prev.settings,
+            col_order: normalized,
+          },
+        };
+        persistData(next);
+        return next;
+      });
+      if (statusTextMsg) {
+        setStatusMsg(statusTextMsg);
+      }
+    },
+    [persistData]
+  );
+
+  const moveColumnByOffset = (colId: string, direction: -1 | 1 | 'start' | 'end') => {
+    const cur = [...colOrder];
+    const fromIdx = cur.indexOf(colId);
+    if (fromIdx === -1) return;
+    const targetVisualIdx =
+      direction === 'start'
+        ? 0
+        : direction === 'end'
+        ? cur.length - 1
+        : fromIdx + direction;
+    const clampedTo = Math.max(0, Math.min(cur.length - 1, targetVisualIdx));
+    if (fromIdx === clampedTo) return;
+    cur.splice(fromIdx, 1);
+    cur.splice(clampedTo, 0, colId);
+    const colTitle = COLS.find((c) => c.id === colId)?.title || colId;
+    applyNewColOrder(cur, `Moved '${colTitle}' column to position ${clampedTo + 1}.`);
+  };
+
+  const openColumnOrderModal = () => {
+    const cur = normalizeColOrder(data.settings.col_order);
+    setDialogColOrder(cur);
+    setDialogSelectedColId(cur[0] || DEFAULT_COL_ORDER[0]);
+    setModal({ type: 'column_order' });
+  };
 
   // Sorted view indices
   const viewIndices = useMemo(
@@ -344,7 +406,7 @@ export default function App() {
     }
   }, [editingKey]);
 
-  // Save column widths on page unload / exit
+  // Save column widths and order on page unload / exit
   useEffect(() => {
     const onBeforeUnload = () => {
       const normalized = normalizeColWidths(colBase);
@@ -353,6 +415,7 @@ export default function App() {
         settings: {
           ...data.settings,
           col_widths: normalized,
+          col_order: normalizeColOrder(data.settings.col_order),
         },
       };
       try {
@@ -819,6 +882,15 @@ export default function App() {
     setData(next);
     persistData(next);
     setSelectedKeys([]);
+    if (editingKey && keysToRemove.includes(editingKey)) {
+      setEditingKey(null);
+    }
+    if (lastClickedKey && keysToRemove.includes(lastClickedKey)) {
+      setLastClickedKey(null);
+    }
+    if (hoveredRowKey && keysToRemove.includes(hoveredRowKey)) {
+      setHoveredRowKey(null);
+    }
     setModal({ type: 'none' });
     setStatusMsg(`Removed ${keysToRemove.length} project(s).`);
   };
@@ -994,7 +1066,10 @@ export default function App() {
         : [...selectedKeys, key];
       setLastClickedKey(key);
     } else if (e && e.shiftKey && lastClickedKey) {
-      const orderedKeys = viewIndices.map((ix) => projectKey(data.projects[ix]));
+      const orderedKeys = viewIndices
+        .map((ix) => data.projects[ix])
+        .filter((proj): proj is Project => Boolean(proj))
+        .map((proj) => projectKey(proj));
       const i1 = orderedKeys.indexOf(lastClickedKey);
       const i2 = orderedKeys.indexOf(key);
       if (i1 !== -1 && i2 !== -1) {
@@ -1160,6 +1235,18 @@ export default function App() {
     </button>
   );
 
+  // Ordered columns resolved from colOrder -> logicalIdx + col definition
+  const orderedCols = useMemo(
+    () =>
+      colOrder
+        .map((colId) => {
+          const logicalIdx = COLS.findIndex((c) => c.id === colId);
+          return logicalIdx >= 0 ? { col: COLS[logicalIdx], logicalIdx } : null;
+        })
+        .filter((x): x is { col: (typeof COLS)[number]; logicalIdx: number } => x !== null),
+    [colOrder]
+  );
+
   return (
     <div
       style={{ backgroundColor: pal.bg, color: pal.fg }}
@@ -1232,7 +1319,7 @@ export default function App() {
         </button>
       </div>
 
-      {/* Row 2: Toolbar buttons (Left: Check, Mark as seen, Open release page, Remove | Right: Import, Export, Settings) */}
+      {/* Row 2: Toolbar buttons (Left: Check, Mark as seen, Open release page, Remove | Right: Columns, README, Build .exe, Import, Export, Settings) */}
       <div className="flex items-center justify-between gap-[8px] mt-[6px] h-[30px] shrink-0">
         <div className="flex items-center gap-[8px]">
           <WinButton
@@ -1259,6 +1346,12 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-[8px]">
+          <WinButton
+            onClick={openColumnOrderModal}
+            icon={<ArrowLeftRight size={14} />}
+            label="Columns"
+            title="Change column order (or drag column headers)"
+          />
           <WinButton
             onClick={() => openExeBuilderModal('readme')}
             icon={<FileText size={14} />}
@@ -1289,7 +1382,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Row 3: SysListView32 table with 8 columns including configurable Source and Target dropdowns */}
+      {/* Row 3: Table with 10 reorderable columns */}
       <div
         ref={listContainerRef}
         onClick={(e) => {
@@ -1303,7 +1396,7 @@ export default function App() {
         }}
         className="flex-1 mt-[8px] border overflow-auto relative flex flex-col"
       >
-        {/* Table Header */}
+        {/* Table Header (drag-and-drop reorderable + right-click menu) */}
         <div
           style={{
             backgroundColor: pal.head_bg,
@@ -1312,24 +1405,78 @@ export default function App() {
           }}
           className="flex items-center h-[26px] shrink-0 sticky top-0 z-10"
         >
-          {COLS.map((col, idx) => {
+          {orderedCols.map(({ col, logicalIdx }) => {
             const isSortable = (SORTABLE as readonly string[]).includes(col.id);
             const isSorted = data.settings.sort_col === col.id;
-            const isHot = hoveredHeaderIdx === idx;
-            const width = colWidths[idx];
+            const isHot = hoveredHeaderIdx === logicalIdx;
+            const width = colWidths[logicalIdx];
+            const isDragTarget = dragOverColId === col.id && draggingColId !== col.id;
             return (
               <div
                 key={col.id}
-                onMouseEnter={() => setHoveredHeaderIdx(idx)}
+                draggable
+                title={`${col.title} — Drag to reorder, right-click for column order options${isSortable ? ', click to sort' : ''}`}
+                onDragStart={(e) => {
+                  setDraggingColId(col.id);
+                  e.dataTransfer.effectAllowed = 'move';
+                  e.dataTransfer.setData('text/plain', col.id);
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                  if (dragOverColId !== col.id) {
+                    setDragOverColId(col.id);
+                  }
+                }}
+                onDragLeave={() => {
+                  if (dragOverColId === col.id) {
+                    setDragOverColId(null);
+                  }
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const fromId = draggingColId || e.dataTransfer.getData('text/plain');
+                  setDraggingColId(null);
+                  setDragOverColId(null);
+                  if (!fromId || fromId === col.id) return;
+                  const fromIdx = colOrder.indexOf(fromId);
+                  const toIdx = colOrder.indexOf(col.id);
+                  if (fromIdx < 0 || toIdx < 0) return;
+                  const next = [...colOrder];
+                  const [moved] = next.splice(fromIdx, 1);
+                  next.splice(toIdx, 0, moved);
+                  const colTitle = COLS.find((c) => c.id === fromId)?.title || fromId;
+                  applyNewColOrder(next, `Moved "${colTitle}" column.`);
+                }}
+                onDragEnd={() => {
+                  setDraggingColId(null);
+                  setDragOverColId(null);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setContextMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    kind: 'header',
+                    colId: col.id,
+                  });
+                }}
+                onMouseEnter={() => setHoveredHeaderIdx(logicalIdx)}
                 onMouseLeave={() => setHoveredHeaderIdx(null)}
-                onClick={() => handleSortBy(idx)}
+                onClick={() => handleSortBy(logicalIdx)}
                 style={{
                   width,
-                  backgroundColor: isHot && isSortable ? pal.btn_bg : pal.head_bg,
-                  color: pal.fg,
+                  backgroundColor: isDragTarget
+                    ? pal.sel_bg
+                    : isHot && isSortable
+                    ? pal.btn_bg
+                    : pal.head_bg,
+                  color: isDragTarget ? pal.sel_fg : pal.fg,
+                  opacity: draggingColId === col.id ? 0.55 : 1,
                 }}
                 className={`h-full flex items-center justify-between px-[6px] font-bold text-[13px] relative shrink-0 ${
-                  isSortable ? 'cursor-pointer' : 'cursor-default'
+                  isSortable ? 'cursor-pointer' : 'cursor-grab'
                 }`}
               >
                 <span className="truncate">{col.title}</span>
@@ -1340,7 +1487,11 @@ export default function App() {
                 )}
                 {/* Column separator & resize handle */}
                 <div
-                  onMouseDown={(e) => handleColResizeStart(e, idx)}
+                  draggable={false}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    handleColResizeStart(e, logicalIdx);
+                  }}
                   onClick={(e) => e.stopPropagation()}
                   style={{ backgroundColor: pal.line }}
                   className="absolute right-0 top-[2px] bottom-[2px] w-[1px] cursor-col-resize after:content-[''] after:absolute after:-left-[3px] after:-right-[3px] after:top-0 after:bottom-0"
@@ -1362,6 +1513,7 @@ export default function App() {
         >
           {viewIndices.map((projIdx) => {
             const p = data.projects[projIdx];
+            if (!p) return null;
             const key = projectKey(p);
             const isSelected = selectedKeys.includes(key);
             const isUpdate = hasUpdate(p);
@@ -1409,279 +1561,325 @@ export default function App() {
                 }}
                 className="flex items-center h-[26px] shrink-0 text-[13px]"
               >
-                {/* Col 0: Title (free-text column at the very left) */}
-                <div
-                  style={{
-                    width: colWidths[0],
-                    borderRight: `1px solid ${pal.line}`,
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    selectRow(key);
-                  }}
-                  onDoubleClick={(e) => e.stopPropagation()}
-                  className="h-full flex items-center px-[4px] shrink-0"
-                >
-                  <input
-                    type="text"
-                    maxLength={MAX_TITLE_LEN}
-                    aria-label={`Title for ${displayName(p)}`}
-                    placeholder="Add title..."
-                    value={p.user_title || ''}
-                    onChange={(e) => handleUserTitleChange(key, e.target.value)}
-                    onBlur={(e) => handleUserTitleBlur(key, e.target.value)}
-                    style={{
-                      backgroundColor: 'transparent',
-                      color: rowFg,
-                    }}
-                    className="w-full h-[21px] px-1 outline-none border-none text-[12.5px] select-text placeholder:opacity-45"
-                  />
-                </div>
+                {orderedCols.map(({ col, logicalIdx }, visualPos) => {
+                  const isLastVisualCol = visualPos === orderedCols.length - 1;
+                  const cellBorderRight = isLastVisualCol ? undefined : `1px solid ${pal.line}`;
+                  const cellWidth = colWidths[logicalIdx];
 
-                {/* Col 1: Project (with hover rename pencil, hover remove trash button, & double-click to rename) */}
-                <div
-                  style={{
-                    width: colWidths[1],
-                    borderRight: `1px solid ${pal.line}`,
-                  }}
-                  onDoubleClick={(e) => {
-                    e.stopPropagation();
-                    startRenameKey(key);
-                  }}
-                  className="h-full flex items-center justify-between px-[6px] shrink-0 relative overflow-hidden"
-                >
-                  {isEditing ? (
-                    <input
-                      ref={renameInputRef}
-                      type="text"
-                      maxLength={MAX_CUSTOM_NAME}
-                      value={editingValue}
-                      onChange={(e) => setEditingValue(e.target.value)}
-                      onBlur={commitRename}
-                      onClick={(e) => e.stopPropagation()}
-                      onDoubleClick={(e) => e.stopPropagation()}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          commitRename();
-                        } else if (e.key === 'Escape') {
-                          e.preventDefault();
-                          setEditingKey(null);
-                        }
-                      }}
+                  if (col.id === 'user_title') {
+                    return (
+                      <div
+                        key={col.id}
+                        style={{
+                          width: cellWidth,
+                          borderRight: cellBorderRight,
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          selectRow(key);
+                        }}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        className="h-full flex items-center px-[4px] shrink-0"
+                      >
+                        <input
+                          type="text"
+                          maxLength={MAX_TITLE_LEN}
+                          aria-label={`Title for ${displayName(p)}`}
+                          placeholder="Add title..."
+                          value={p.user_title || ''}
+                          onChange={(e) => handleUserTitleChange(key, e.target.value)}
+                          onBlur={(e) => handleUserTitleBlur(key, e.target.value)}
+                          style={{
+                            backgroundColor: 'transparent',
+                            color: rowFg,
+                          }}
+                          className="w-full h-[21px] px-1 outline-none border-none text-[12.5px] select-text placeholder:opacity-45"
+                        />
+                      </div>
+                    );
+                  }
+
+                  if (col.id === 'name') {
+                    return (
+                      <div
+                        key={col.id}
+                        style={{
+                          width: cellWidth,
+                          borderRight: cellBorderRight,
+                        }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          startRenameKey(key);
+                        }}
+                        className="h-full flex items-center justify-between px-[6px] shrink-0 relative overflow-hidden"
+                      >
+                        {isEditing ? (
+                          <input
+                            ref={renameInputRef}
+                            type="text"
+                            maxLength={MAX_CUSTOM_NAME}
+                            value={editingValue}
+                            onChange={(e) => setEditingValue(e.target.value)}
+                            onBlur={commitRename}
+                            onClick={(e) => e.stopPropagation()}
+                            onDoubleClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                commitRename();
+                              } else if (e.key === 'Escape') {
+                                e.preventDefault();
+                                setEditingKey(null);
+                              }
+                            }}
+                            style={{
+                              backgroundColor: pal.field,
+                              color: pal.fg,
+                              borderColor: pal.sel_bg,
+                            }}
+                            className="w-full h-[20px] px-1 border outline-none text-[13px] select-text"
+                          />
+                        ) : (
+                          <>
+                            <span className="truncate pr-10">{displayName(p)}</span>
+                            {isHovered && (
+                              <div className="flex items-center gap-0.5 absolute right-[4px]">
+                                <button
+                                  type="button"
+                                  title="Rename project (F2)"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    startRenameKey(key);
+                                  }}
+                                  style={{
+                                    backgroundColor: rowBg,
+                                    color: rowFg,
+                                  }}
+                                  className="w-[20px] h-[20px] flex items-center justify-center rounded-[2px] cursor-pointer hover:opacity-80"
+                                >
+                                  <Pencil size={12} />
+                                </button>
+                                <button
+                                  type="button"
+                                  title="Remove project (Del)"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handlePromptRemoveRow(key);
+                                  }}
+                                  style={{
+                                    backgroundColor: rowBg,
+                                    color: isSelected ? rowFg : pal.error_fg,
+                                  }}
+                                  className="w-[20px] h-[20px] flex items-center justify-center rounded-[2px] cursor-pointer hover:opacity-80"
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  if (col.id === 'repo') {
+                    return (
+                      <div
+                        key={col.id}
+                        style={{
+                          width: cellWidth,
+                          borderRight: cellBorderRight,
+                        }}
+                        onDoubleClick={() => handleOpenRelease(p)}
+                        className="h-full flex items-center px-[6px] shrink-0 truncate"
+                      >
+                        <span className="truncate">{repoDisplayLabel(p)}</span>
+                      </div>
+                    );
+                  }
+
+                  if (col.id === 'source') {
+                    return (
+                      <div
+                        key={col.id}
+                        style={{
+                          width: cellWidth,
+                          borderRight: cellBorderRight,
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          selectRow(key);
+                        }}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        className="h-full flex items-center px-[4px] shrink-0"
+                      >
+                        <select
+                          aria-label={`Source platform for ${displayName(p)}`}
+                          value={p.source}
+                          onChange={(e) => handlePlatformChange(key, 'source', e.target.value)}
+                          style={{
+                            backgroundColor: isSelected ? pal.sel_bg : rowBg,
+                            color: rowFg,
+                            borderColor: isSelected ? 'rgba(255,255,255,0.35)' : pal.border,
+                          }}
+                          className="w-full h-[21px] px-1 rounded-[3px] border text-[12px] outline-none cursor-pointer"
+                        >
+                          {SOURCE_PLATFORMS.map((plat: SourcePlatform) => (
+                            <option
+                              key={plat}
+                              value={plat}
+                              style={{
+                                backgroundColor: pal.field,
+                                color: pal.fg,
+                              }}
+                            >
+                              {plat}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  }
+
+                  if (col.id === 'target') {
+                    return (
+                      <div
+                        key={col.id}
+                        style={{
+                          width: cellWidth,
+                          borderRight: cellBorderRight,
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          selectRow(key);
+                        }}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        className="h-full flex items-center px-[4px] shrink-0"
+                      >
+                        <select
+                          aria-label={`Target platform for ${displayName(p)}`}
+                          value={p.target}
+                          onChange={(e) => handlePlatformChange(key, 'target', e.target.value)}
+                          style={{
+                            backgroundColor: isSelected ? pal.sel_bg : rowBg,
+                            color: rowFg,
+                            borderColor: isSelected ? 'rgba(255,255,255,0.35)' : pal.border,
+                          }}
+                          className="w-full h-[21px] px-1 rounded-[3px] border text-[12px] outline-none cursor-pointer"
+                        >
+                          {TARGET_PLATFORMS.map((plat: TargetPlatform) => (
+                            <option
+                              key={plat}
+                              value={plat}
+                              style={{
+                                backgroundColor: pal.field,
+                                color: pal.fg,
+                              }}
+                            >
+                              {plat}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  }
+
+                  if (col.id === 'release') {
+                    return (
+                      <div
+                        key={col.id}
+                        style={{
+                          width: cellWidth,
+                          borderRight: cellBorderRight,
+                        }}
+                        onDoubleClick={() => handleOpenRelease(p)}
+                        className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
+                      >
+                        <span className="truncate">{releaseLabel(p)}</span>
+                      </div>
+                    );
+                  }
+
+                  if (col.id === 'published') {
+                    return (
+                      <div
+                        key={col.id}
+                        style={{
+                          width: cellWidth,
+                          borderRight: cellBorderRight,
+                        }}
+                        onDoubleClick={() => handleOpenRelease(p)}
+                        className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
+                      >
+                        <span className="truncate">{publishedLabel(p)}</span>
+                      </div>
+                    );
+                  }
+
+                  if (col.id === 'status') {
+                    return (
+                      <div
+                        key={col.id}
+                        style={{
+                          width: cellWidth,
+                          borderRight: cellBorderRight,
+                        }}
+                        onDoubleClick={() => handleOpenRelease(p)}
+                        className="h-full flex items-center px-[6px] shrink-0 truncate"
+                      >
+                        <span className="truncate">{statusText(p)}</span>
+                      </div>
+                    );
+                  }
+
+                  if (col.id === 'checked') {
+                    return (
+                      <div
+                        key={col.id}
+                        style={{
+                          width: cellWidth,
+                          borderRight: cellBorderRight,
+                        }}
+                        onDoubleClick={() => handleOpenRelease(p)}
+                        className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
+                      >
+                        <span className="truncate">{checkedLabel(p)}</span>
+                      </div>
+                    );
+                  }
+
+                  // col.id === 'comment'
+                  return (
+                    <div
+                      key={col.id}
                       style={{
-                        backgroundColor: pal.field,
-                        color: pal.fg,
-                        borderColor: pal.sel_bg,
+                        width: cellWidth,
+                        borderRight: cellBorderRight,
                       }}
-                      className="w-full h-[20px] px-1 border outline-none text-[13px] select-text"
-                    />
-                  ) : (
-                    <>
-                      <span className="truncate pr-10">{displayName(p)}</span>
-                      {isHovered && (
-                        <div className="flex items-center gap-0.5 absolute right-[4px]">
-                          <button
-                            type="button"
-                            title="Rename project (F2)"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              startRenameKey(key);
-                            }}
-                            style={{
-                              backgroundColor: rowBg,
-                              color: rowFg,
-                            }}
-                            className="w-[20px] h-[20px] flex items-center justify-center rounded-[2px] cursor-pointer hover:opacity-80"
-                          >
-                            <Pencil size={12} />
-                          </button>
-                          <button
-                            type="button"
-                            title="Remove project (Del)"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handlePromptRemoveRow(key);
-                            }}
-                            style={{
-                              backgroundColor: rowBg,
-                              color: isSelected ? rowFg : pal.error_fg,
-                            }}
-                            className="w-[20px] h-[20px] flex items-center justify-center rounded-[2px] cursor-pointer hover:opacity-80"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-
-                {/* Col 2: Repository */}
-                <div
-                  style={{
-                    width: colWidths[2],
-                    borderRight: `1px solid ${pal.line}`,
-                  }}
-                  onDoubleClick={() => handleOpenRelease(p)}
-                  className="h-full flex items-center px-[6px] shrink-0 truncate"
-                >
-                  <span className="truncate">{repoDisplayLabel(p)}</span>
-                </div>
-
-                {/* Col 3: Source (Configurable dropdown box: PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox, Wii, Wii U) */}
-                <div
-                  style={{
-                    width: colWidths[3],
-                    borderRight: `1px solid ${pal.line}`,
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    selectRow(key);
-                  }}
-                  onDoubleClick={(e) => e.stopPropagation()}
-                  className="h-full flex items-center px-[4px] shrink-0"
-                >
-                  <select
-                    aria-label={`Source platform for ${displayName(p)}`}
-                    value={p.source}
-                    onChange={(e) => handlePlatformChange(key, 'source', e.target.value)}
-                    style={{
-                      backgroundColor: isSelected ? pal.sel_bg : rowBg,
-                      color: rowFg,
-                      borderColor: isSelected ? 'rgba(255,255,255,0.35)' : pal.border,
-                    }}
-                    className="w-full h-[21px] px-1 rounded-[3px] border text-[12px] outline-none cursor-pointer"
-                  >
-                    {SOURCE_PLATFORMS.map((plat: SourcePlatform) => (
-                      <option
-                        key={plat}
-                        value={plat}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        selectRow(key);
+                      }}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      className="h-full flex items-center px-[4px] shrink-0"
+                    >
+                      <input
+                        type="text"
+                        maxLength={MAX_COMMENT_LEN}
+                        aria-label={`Comment for ${displayName(p)}`}
+                        placeholder="Add comment..."
+                        value={p.comment || ''}
+                        onChange={(e) => handleCommentChange(key, e.target.value)}
+                        onBlur={(e) => handleCommentBlur(key, e.target.value)}
                         style={{
-                          backgroundColor: pal.field,
-                          color: pal.fg,
+                          backgroundColor: 'transparent',
+                          color: rowFg,
                         }}
-                      >
-                        {plat}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Col 4: Target (Configurable dropdown box: PC, Android, Switch, Switch 2, PS5, PS4, PS3) */}
-                <div
-                  style={{
-                    width: colWidths[4],
-                    borderRight: `1px solid ${pal.line}`,
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    selectRow(key);
-                  }}
-                  onDoubleClick={(e) => e.stopPropagation()}
-                  className="h-full flex items-center px-[4px] shrink-0"
-                >
-                  <select
-                    aria-label={`Target platform for ${displayName(p)}`}
-                    value={p.target}
-                    onChange={(e) => handlePlatformChange(key, 'target', e.target.value)}
-                    style={{
-                      backgroundColor: isSelected ? pal.sel_bg : rowBg,
-                      color: rowFg,
-                      borderColor: isSelected ? 'rgba(255,255,255,0.35)' : pal.border,
-                    }}
-                    className="w-full h-[21px] px-1 rounded-[3px] border text-[12px] outline-none cursor-pointer"
-                  >
-                    {TARGET_PLATFORMS.map((plat: TargetPlatform) => (
-                      <option
-                        key={plat}
-                        value={plat}
-                        style={{
-                          backgroundColor: pal.field,
-                          color: pal.fg,
-                        }}
-                      >
-                        {plat}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Col 5: Current release */}
-                <div
-                  style={{
-                    width: colWidths[5],
-                    borderRight: `1px solid ${pal.line}`,
-                  }}
-                  onDoubleClick={() => handleOpenRelease(p)}
-                  className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
-                >
-                  <span className="truncate">{releaseLabel(p)}</span>
-                </div>
-
-                {/* Col 6: Published */}
-                <div
-                  style={{
-                    width: colWidths[6],
-                    borderRight: `1px solid ${pal.line}`,
-                  }}
-                  onDoubleClick={() => handleOpenRelease(p)}
-                  className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
-                >
-                  <span className="truncate">{publishedLabel(p)}</span>
-                </div>
-
-                {/* Col 7: Status */}
-                <div
-                  style={{
-                    width: colWidths[7],
-                    borderRight: `1px solid ${pal.line}`,
-                  }}
-                  onDoubleClick={() => handleOpenRelease(p)}
-                  className="h-full flex items-center px-[6px] shrink-0 truncate"
-                >
-                  <span className="truncate">{statusText(p)}</span>
-                </div>
-
-                {/* Col 8: Last checked */}
-                <div
-                  style={{
-                    width: colWidths[8],
-                    borderRight: `1px solid ${pal.line}`,
-                  }}
-                  onDoubleClick={() => handleOpenRelease(p)}
-                  className="h-full flex items-center px-[6px] shrink-0 truncate tabular-nums"
-                >
-                  <span className="truncate">{checkedLabel(p)}</span>
-                </div>
-
-                {/* Col 9: Comment (free text at the far right) */}
-                <div
-                  style={{
-                    width: colWidths[9],
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    selectRow(key);
-                  }}
-                  onDoubleClick={(e) => e.stopPropagation()}
-                  className="h-full flex items-center px-[4px] shrink-0"
-                >
-                  <input
-                    type="text"
-                    maxLength={MAX_COMMENT_LEN}
-                    aria-label={`Comment for ${displayName(p)}`}
-                    placeholder="Add comment..."
-                    value={p.comment || ''}
-                    onChange={(e) => handleCommentChange(key, e.target.value)}
-                    onBlur={(e) => handleCommentBlur(key, e.target.value)}
-                    style={{
-                      backgroundColor: 'transparent',
-                      color: rowFg,
-                    }}
-                    className="w-full h-[21px] px-1 outline-none border-none text-[12.5px] select-text placeholder:opacity-45"
-                  />
-                </div>
+                        className="w-full h-[21px] px-1 outline-none border-none text-[12.5px] select-text placeholder:opacity-45"
+                      />
+                    </div>
+                  );
+                })}
               </div>
             );
           })}
@@ -1724,14 +1922,14 @@ export default function App() {
       {contextMenu && (
         <div
           style={{
-            left: Math.min(contextMenu.x, window.innerWidth - 210),
-            top: Math.min(contextMenu.y, window.innerHeight - 230),
+            left: Math.min(contextMenu.x, window.innerWidth - 235),
+            top: Math.min(contextMenu.y, window.innerHeight - 250),
             backgroundColor: pal.field,
             color: pal.fg,
             borderColor: pal.border,
           }}
           onClick={(e) => e.stopPropagation()}
-          className="fixed z-50 border rounded-[4px] shadow-lg py-1 min-w-[195px] text-[13px]"
+          className="fixed z-50 border rounded-[4px] shadow-lg py-1 min-w-[215px] text-[13px]"
         >
           {contextMenu.kind === 'status' ? (
             <button
@@ -1744,6 +1942,87 @@ export default function App() {
             >
               Copy
             </button>
+          ) : contextMenu.kind === 'header' && contextMenu.colId ? (
+            (() => {
+              const targetColId = contextMenu.colId;
+              const targetColTitle = COLS.find((c) => c.id === targetColId)?.title || targetColId;
+              const visIdx = colOrder.indexOf(targetColId);
+              const canMoveLeft = visIdx > 0;
+              const canMoveRight = visIdx >= 0 && visIdx < colOrder.length - 1;
+              return (
+                <>
+                  <button
+                    type="button"
+                    disabled={!canMoveLeft}
+                    onClick={() => {
+                      setContextMenu(null);
+                      moveColumnByOffset(targetColId, -1);
+                    }}
+                    style={{ color: canMoveLeft ? pal.fg : pal.none_fg }}
+                    className="w-full text-left px-3 py-1.5 enabled:hover:bg-[#0078d4] enabled:hover:text-white cursor-pointer disabled:cursor-default"
+                  >
+                    Move &apos;{targetColTitle}&apos; Left
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canMoveRight}
+                    onClick={() => {
+                      setContextMenu(null);
+                      moveColumnByOffset(targetColId, 1);
+                    }}
+                    style={{ color: canMoveRight ? pal.fg : pal.none_fg }}
+                    className="w-full text-left px-3 py-1.5 enabled:hover:bg-[#0078d4] enabled:hover:text-white cursor-pointer disabled:cursor-default"
+                  >
+                    Move &apos;{targetColTitle}&apos; Right
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canMoveLeft}
+                    onClick={() => {
+                      setContextMenu(null);
+                      moveColumnByOffset(targetColId, 'start');
+                    }}
+                    style={{ color: canMoveLeft ? pal.fg : pal.none_fg }}
+                    className="w-full text-left px-3 py-1.5 enabled:hover:bg-[#0078d4] enabled:hover:text-white cursor-pointer disabled:cursor-default"
+                  >
+                    Move &apos;{targetColTitle}&apos; to Far Left
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canMoveRight}
+                    onClick={() => {
+                      setContextMenu(null);
+                      moveColumnByOffset(targetColId, 'end');
+                    }}
+                    style={{ color: canMoveRight ? pal.fg : pal.none_fg }}
+                    className="w-full text-left px-3 py-1.5 enabled:hover:bg-[#0078d4] enabled:hover:text-white cursor-pointer disabled:cursor-default"
+                  >
+                    Move &apos;{targetColTitle}&apos; to Far Right
+                  </button>
+                  <div style={{ backgroundColor: pal.line }} className="my-1 h-[1px]" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setContextMenu(null);
+                      openColumnOrderModal();
+                    }}
+                    className="w-full text-left px-3 py-1.5 hover:bg-[#0078d4] hover:text-white cursor-pointer"
+                  >
+                    Configure Column Order...
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setContextMenu(null);
+                      applyNewColOrder([...DEFAULT_COL_ORDER], 'Column order reset to default.');
+                    }}
+                    className="w-full text-left px-3 py-1.5 hover:bg-[#0078d4] hover:text-white cursor-pointer"
+                  >
+                    Reset Column Order to Default
+                  </button>
+                </>
+              );
+            })()
           ) : (
             <>
               <button
@@ -1839,12 +2118,233 @@ export default function App() {
         </div>
       )}
 
-      {/* Modals (Settings, About, MessageBox, Remove Confirm, Import Confirm) */}
+      {/* Modals (Column Order, Settings, About, MessageBox, Remove Confirm, Import Confirm) */}
       {modal.type !== 'none' && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
           onClick={() => setModal({ type: 'none' })}
         >
+          {/* Column Order Dialog (matches PyQt6 ColumnOrderDialog) */}
+          {modal.type === 'column_order' && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                backgroundColor: pal.bg,
+                color: pal.fg,
+                borderColor: pal.border,
+                width: 440,
+              }}
+              className="border rounded-[6px] shadow-2xl overflow-hidden"
+            >
+              <div
+                style={{ backgroundColor: pal.head_bg, borderBottom: `1px solid ${pal.line}` }}
+                className="px-3.5 py-2 flex items-center justify-between text-[13px] font-semibold"
+              >
+                <span>Column Order</span>
+                <button
+                  type="button"
+                  onClick={() => setModal({ type: 'none' })}
+                  className="opacity-70 hover:opacity-100 cursor-pointer px-1"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="p-[14px] flex flex-col gap-3">
+                <p style={{ color: pal.sub_fg }} className="text-[12px] leading-relaxed">
+                  Arrange the left-to-right display order of columns (top = far left, bottom = far
+                  right). You can also drag and drop column headers directly in the table.
+                </p>
+
+                <div className="flex gap-2.5">
+                  <div
+                    style={{
+                      backgroundColor: pal.field,
+                      borderColor: pal.border,
+                    }}
+                    className="flex-1 border rounded-[4px] overflow-hidden flex flex-col"
+                  >
+                    {dialogColOrder.map((cid, idx) => {
+                      const colDef = COLS.find((c) => c.id === cid);
+                      const isSel = dialogSelectedColId === cid;
+                      return (
+                        <button
+                          key={cid}
+                          type="button"
+                          onClick={() => setDialogSelectedColId(cid)}
+                          style={{
+                            backgroundColor: isSel ? pal.sel_bg : 'transparent',
+                            color: isSel ? pal.sel_fg : pal.fg,
+                            borderBottom:
+                              idx < dialogColOrder.length - 1 ? `1px solid ${pal.line}` : undefined,
+                          }}
+                          className="w-full text-left px-2.5 py-1.5 text-[13px] flex items-center justify-between cursor-pointer"
+                        >
+                          <span>
+                            {idx + 1}. {colDef?.title || cid}
+                          </span>
+                          <span className="text-[11px] opacity-65">{cid}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex flex-col gap-1.5 w-[124px] shrink-0">
+                    <button
+                      type="button"
+                      disabled={dialogColOrder.indexOf(dialogSelectedColId) <= 0}
+                      onClick={() => {
+                        const i = dialogColOrder.indexOf(dialogSelectedColId);
+                        if (i <= 0) return;
+                        const next = [...dialogColOrder];
+                        [next[i - 1], next[i]] = [next[i], next[i - 1]];
+                        setDialogColOrder(next);
+                      }}
+                      style={{
+                        backgroundColor: pal.btn_bg,
+                        color:
+                          dialogColOrder.indexOf(dialogSelectedColId) > 0 ? pal.fg : pal.none_fg,
+                        borderColor: pal.border,
+                        height: 28,
+                      }}
+                      className="rounded-[4px] border text-[12.5px] px-2 cursor-pointer disabled:cursor-default"
+                    >
+                      ↑ Move Left
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        dialogColOrder.indexOf(dialogSelectedColId) < 0 ||
+                        dialogColOrder.indexOf(dialogSelectedColId) >= dialogColOrder.length - 1
+                      }
+                      onClick={() => {
+                        const i = dialogColOrder.indexOf(dialogSelectedColId);
+                        if (i < 0 || i >= dialogColOrder.length - 1) return;
+                        const next = [...dialogColOrder];
+                        [next[i + 1], next[i]] = [next[i], next[i + 1]];
+                        setDialogColOrder(next);
+                      }}
+                      style={{
+                        backgroundColor: pal.btn_bg,
+                        color:
+                          dialogColOrder.indexOf(dialogSelectedColId) >= 0 &&
+                          dialogColOrder.indexOf(dialogSelectedColId) < dialogColOrder.length - 1
+                            ? pal.fg
+                            : pal.none_fg,
+                        borderColor: pal.border,
+                        height: 28,
+                      }}
+                      className="rounded-[4px] border text-[12.5px] px-2 cursor-pointer disabled:cursor-default"
+                    >
+                      ↓ Move Right
+                    </button>
+                    <button
+                      type="button"
+                      disabled={dialogColOrder.indexOf(dialogSelectedColId) <= 0}
+                      onClick={() => {
+                        const i = dialogColOrder.indexOf(dialogSelectedColId);
+                        if (i <= 0) return;
+                        const next = [...dialogColOrder];
+                        const [moved] = next.splice(i, 1);
+                        next.unshift(moved);
+                        setDialogColOrder(next);
+                      }}
+                      style={{
+                        backgroundColor: pal.btn_bg,
+                        color:
+                          dialogColOrder.indexOf(dialogSelectedColId) > 0 ? pal.fg : pal.none_fg,
+                        borderColor: pal.border,
+                        height: 28,
+                      }}
+                      className="rounded-[4px] border text-[12.5px] px-2 cursor-pointer disabled:cursor-default"
+                    >
+                      ⤒ Far Left
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        dialogColOrder.indexOf(dialogSelectedColId) < 0 ||
+                        dialogColOrder.indexOf(dialogSelectedColId) >= dialogColOrder.length - 1
+                      }
+                      onClick={() => {
+                        const i = dialogColOrder.indexOf(dialogSelectedColId);
+                        if (i < 0 || i >= dialogColOrder.length - 1) return;
+                        const next = [...dialogColOrder];
+                        const [moved] = next.splice(i, 1);
+                        next.push(moved);
+                        setDialogColOrder(next);
+                      }}
+                      style={{
+                        backgroundColor: pal.btn_bg,
+                        color:
+                          dialogColOrder.indexOf(dialogSelectedColId) >= 0 &&
+                          dialogColOrder.indexOf(dialogSelectedColId) < dialogColOrder.length - 1
+                            ? pal.fg
+                            : pal.none_fg,
+                        borderColor: pal.border,
+                        height: 28,
+                      }}
+                      className="rounded-[4px] border text-[12.5px] px-2 cursor-pointer disabled:cursor-default"
+                    >
+                      ⤓ Far Right
+                    </button>
+                    <div className="flex-1" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDialogColOrder([...DEFAULT_COL_ORDER]);
+                        setDialogSelectedColId(DEFAULT_COL_ORDER[0]);
+                      }}
+                      style={{
+                        backgroundColor: pal.btn_bg,
+                        color: pal.fg,
+                        borderColor: pal.border,
+                        height: 28,
+                      }}
+                      className="rounded-[4px] border text-[12.5px] px-2 cursor-pointer"
+                    >
+                      Reset Default
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      applyNewColOrder(dialogColOrder, 'Column order saved.');
+                      setModal({ type: 'none' });
+                    }}
+                    style={{
+                      backgroundColor: pal.sel_bg,
+                      color: pal.sel_fg,
+                      borderColor: pal.sel_bg,
+                      width: 84,
+                      height: 28,
+                    }}
+                    className="rounded-[4px] border text-[13px] font-medium cursor-pointer"
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setModal({ type: 'none' })}
+                    style={{
+                      backgroundColor: pal.btn_bg,
+                      color: pal.fg,
+                      borderColor: pal.border,
+                      width: 84,
+                      height: 28,
+                    }}
+                    className="rounded-[4px] border text-[13px] cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Settings Dialog (matches src/dialogs.rs show_settings) */}
           {modal.type === 'settings' && (
             <div

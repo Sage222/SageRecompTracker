@@ -2,11 +2,11 @@
 
 A small, portable desktop app contained in a **single Python file (`github_release_tracker.py`)** using **Python 3** and **PyQt6** that tracks the latest release of the GitHub projects you care about and tells you when a new one appears. No account, no login, and no token needed.
 
-> **Portable Single-File PyQt6 Edition:** Based on **[github-release-tracker-rs](https://github.com/santosasarno-code/github-release-tracker-rs)**, ported to a single self-contained **Python + PyQt6** file (`github_release_tracker.py`) with full `projects.json` compatibility, a free-text **Title** column at the very left, a free-text **Comment** column at the far right, configurable **Source** and **Target** platform columns via drop-down box, multi-site release tracking (GitHub, Forgejo/Gitea, and download pages), and row removal with confirmation.
+> **Portable Single-File PyQt6 Edition:** Based on **[github-release-tracker-rs](https://github.com/santosasarno-code/github-release-tracker-rs)**, ported to a single self-contained **Python + PyQt6** file (`github_release_tracker.py`) with full `projects.json` compatibility, a free-text **Title** column at the very left, a free-text **Comment** column at the far right, configurable **Source** and **Target** platform columns via drop-down box, customizable **Column Order** (drag-and-drop or dialog), multi-site release tracking (GitHub, Forgejo/Gitea, and download pages), and crash-free row removal with confirmation.
 
 ## Portable Single-File Design
 
-- **Single `.py` File**: All core logic (GitHub, Forgejo/Gitea, and download page release & feed parsers, `Source` & `Target` platform validation, atomic JSON persistence, sorting), the full **PyQt6 GUI**, an automatic `icon.ico` generator, a built-in PyInstaller `.exe` builder (`--build-exe`), and an 11-test `unittest` suite (`--test`) live inside one standalone file: **`github_release_tracker.py`**.
+- **Single `.py` File**: All core logic (GitHub, Forgejo/Gitea, and download page release & feed parsers, `Source` & `Target` platform validation, atomic JSON persistence, sorting, column width & order persistence), the full **PyQt6 GUI**, an automatic `icon.ico` generator, a built-in PyInstaller `.exe` builder (`--build-exe`), and a 12-test `unittest` suite (`--test`) live inside one standalone file: **`github_release_tracker.py`**.
 - **Self-Contained Directory Storage**: You can drop `github_release_tracker.py` into any folder on your computer or USB drive and run it. It automatically creates and updates its runtime files (`projects.json`, atomic `projects.json.tmp`, `projects.json.bak`, and `icon.ico`) right next to `github_release_tracker.py` in its own directory (falling back to `%APPDATA%\GitHubReleaseTracker` only if the folder is read-only).
 
 ## Features
@@ -15,14 +15,19 @@ A small, portable desktop app contained in a **single Python file (`github_relea
   - A GitHub URL or `owner/repo` (e.g. `https://github.com/Ryubing/Ryujinx` or `Ryubing/Ryujinx`)
   - A Forgejo / Gitea / Codeberg repository URL (e.g. `https://git.magicbean.dev/MagicBeanDev/Longshot`)
   - A project downloads page URL (e.g. `https://eden-emu.dev/downloads/`)
-- **10-Column Overview**: See the free-text **Title** (very left, Column 0), **Project** name, **Repository**, **Source** platform, **Target** platform, **Current release**, **Published** date, **Status**, **Last checked** timestamp, and free-text **Comment** (far right, Column 9) at a glance
-- **Free-text `Title` column at the very left (Column 0)**: Type a custom free-text title directly in the leftmost column of any project row; titles are saved automatically to `projects.json` and can be sorted by clicking the **Title** header
+- **10-Column Overview**: See the free-text **Title** (default Column 0), **Project** name, **Repository**, **Source** platform, **Target** platform, **Current release**, **Published** date, **Status**, **Last checked** timestamp, and free-text **Comment** (default Column 9) at a glance
+- **Customizable Column Order**: Reorder any of the 10 columns however you like:
+  - **Drag and drop** any column header directly in the table
+  - **Right-click** any column header to *Move Left*, *Move Right*, *Move to Far Left*, *Move to Far Right*, *Configure Column Order...*, or *Reset Column Order to Default*
+  - Click the **⇄ Columns** button on the toolbar to open the **Column Order** dialog
+  - Your custom column order is saved automatically in `settings.col_order` inside `projects.json` and restored on startup
+- **Free-text `Title` column (default very left, Column 0)**: Type a custom free-text title directly in the Title column of any project row; titles are saved automatically to `projects.json` and can be sorted by clicking the **Title** header
 - **Configurable Source & Target columns**: Configure both **Source** and **Target** for every tracked project via an inline `QComboBox` drop-down box:
   - **Source options**: `PC`, `Android`, `Switch`, `Switch 2`, `PS5`, `PS4`, `PS3`, `Xbox`, `Wii`, `Wii U`
   - **Target options**: `PC`, `Android`, `Switch`, `Switch 2`, `PS5`, `PS4`, `PS3`
-- **Free-text `Comment` column at the far right (Column 9)**: Type free-text notes or comments directly in the rightmost column of any project row; comments are saved automatically to `projects.json` and can be sorted by clicking the **Comment** header
+- **Free-text `Comment` column (default far right, Column 9)**: Type free-text notes or comments directly in the Comment column of any project row; comments are saved automatically to `projects.json` and can be sorted by clicking the **Comment** header
 - **Remove rows with confirmation**: Remove any tracked project row via the toolbar **Remove** button, right-click context menu > **Remove**, or the **Delete** key—always protected by a confirmation dialog (`Remove 'name' (repo) from the list?`) before deletion
-- **Column widths saved on exit**: Dragging any column border saves your custom pixel column widths into `settings.col_widths` in `projects.json` both immediately on resize and on exit (`closeEvent` + `aboutToQuit`), and restores them on launch without overwriting them on window resize
+- **Column widths & order saved on exit**: Dragging any column border or reordering any column saves your custom pixel column widths (`settings.col_widths`) and visual order (`settings.col_order`) in `projects.json` both immediately and on exit (`closeEvent` + `aboutToQuit`), and restores them on launch
 - **Check for updates** refreshes every project on a background `QThread`; a newer release is highlighted as `Update available: v1.0 -> v1.1`
 - **Mark as seen** clears the highlight once you have dealt with an update
 - Double-click a project row (or use **Open release page**) to open its release page in your browser; double-clicking the **Project** name renames it instead
@@ -45,7 +50,7 @@ python github_release_tracker.py
 | Command | Description |
 |---|---|
 | `python github_release_tracker.py` | Launch the PyQt6 desktop GUI (creates `projects.json` & `icon.ico` next to `github_release_tracker.py`) |
-| `python github_release_tracker.py --test` | Run the built-in 11-test `unittest` suite |
+| `python github_release_tracker.py --test` | Run the built-in 12-test `unittest` suite |
 | `python github_release_tracker.py --build-exe` | Build a standalone `dist/GitHubReleaseTracker.exe` next to `github_release_tracker.py` using PyInstaller |
 
 ## Build a Standalone `.exe` (PyInstaller EXE Builder)

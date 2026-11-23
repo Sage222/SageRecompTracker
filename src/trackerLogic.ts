@@ -62,6 +62,7 @@ export const COLS: ReadonlyArray<{ id: string; title: string }> = [
 
 export const COL_BASE: number[] = [150, 180, 210, 105, 105, 135, 110, 210, 125, 180];
 export const COL_MIN: number[] = [90, 110, 110, 85, 85, 90, 100, 120, 100, 90];
+export const DEFAULT_COL_ORDER: string[] = COLS.map((c) => c.id);
 
 export type ReleaseId = number | string;
 
@@ -102,6 +103,7 @@ export interface Settings {
   sort_col: string;
   sort_asc: boolean;
   col_widths: number[];
+  col_order?: string[];
 }
 
 export interface TrackerData {
@@ -190,6 +192,25 @@ export function normalizeColWidths(raw: unknown): number[] {
     }
   }
   return [...COL_BASE];
+}
+
+export function normalizeColOrder(raw: unknown): string[] {
+  const validIds = COLS.map((c) => c.id);
+  const validSet = new Set(validIds);
+  const out: string[] = [];
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item === 'string' && validSet.has(item) && !out.includes(item)) {
+        out.push(item);
+      }
+    }
+  }
+  for (const cid of validIds) {
+    if (!out.includes(cid)) {
+      out.push(cid);
+    }
+  }
+  return out;
 }
 
 export function cleanComment(raw: unknown): string {

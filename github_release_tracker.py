@@ -32,6 +32,7 @@ import re
 import struct
 import subprocess
 import sys
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -101,6 +102,7 @@ COLS: Tuple[Tuple[str, str], ...] = (
 
 COL_BASE: Tuple[int, ...] = (150, 180, 210, 105, 105, 135, 110, 210, 125, 180)
 COL_MIN: Tuple[int, ...] = (90, 110, 110, 85, 85, 90, 100, 120, 100, 90)
+DEFAULT_COL_ORDER: Tuple[str, ...] = tuple(cid for cid, _ in COLS)
 
 
 # ===========================================================================
@@ -246,6 +248,21 @@ def normalize_col_widths(raw: Any) -> List[int]:
                     return list(COL_BASE)
             return out
     return list(COL_BASE)
+
+
+def normalize_col_order(raw: Any) -> List[str]:
+    """Validate and normalize saved column order so all column IDs in COLS appear once."""
+    valid_ids = [cid for cid, _ in COLS]
+    valid_set = set(valid_ids)
+    out: List[str] = []
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            if isinstance(item, str) and item in valid_set and item not in out:
+                out.append(item)
+    for cid in valid_ids:
+        if cid not in out:
+            out.append(cid)
+    return out
 
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
@@ -739,6 +756,7 @@ def default_data() -> Dict[str, Any]:
             "sort_col": "",
             "sort_asc": True,
             "col_widths": list(COL_BASE),
+            "col_order": list(DEFAULT_COL_ORDER),
         },
         "projects": [],
     }
@@ -768,6 +786,7 @@ def parse_data(text: str) -> Optional[Dict[str, Any]]:
         data["settings"]["sort_col"] = sc if sc in SORTABLE else ""
         data["settings"]["sort_asc"] = s.get("sort_asc") is not False
         data["settings"]["col_widths"] = normalize_col_widths(s.get("col_widths"))
+        data["settings"]["col_order"] = normalize_col_order(s.get("col_order"))
 
     parsed = parse_import(v)
     data["projects"] = parsed[0] if parsed else []
@@ -1436,6 +1455,8 @@ def run_gui() -> int:
             QHeaderView,
             QLabel,
             QLineEdit,
+            QListWidget,
+            QListWidgetItem,
             QMainWindow,
             QMenu,
             QMessageBox,
@@ -1454,22 +1475,23 @@ def run_gui() -> int:
         return 1
 
     class RowSelectFilter(QObject):
-        """Ensures clicking or focusing a cell widget selects its row in QTableWidget."""
+        """Ensures clicking a cell widget selects its row in QTableWidget safely."""
 
-        def __init__(self, table: QTableWidget, row: int) -> None:
-            super().__init__(table)
-            self.table = table
+        def __init__(self, win: "MainWindow", widget: QWidget, row: int) -> None:
+            super().__init__(widget)
+            self.win = win
             self.row = row
 
         def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-            if event.type() in (
-                QEvent.Type.FocusIn,
-                QEvent.Type.MouseButtonPress,
-            ):
-                selected_rows = {idx.row() for idx in self.table.selectedIndexes()}
-                if self.row not in selected_rows:
-                    self.table.selectRow(self.row)
-            return super().eventFilter(obj, event)
+            if self.win.suppress_events:
+                return False
+            if event.type() == QEvent.Type.MouseButtonPress:
+                table = self.win.table
+                if 0 <= self.row < table.rowCount():
+                    selected_rows = {idx.row() for idx in table.selectedIndexes()}
+                    if self.row not in selected_rows:
+                        table.selectRow(self.row)
+            return False
 
     class AddProjectWorker(QThread):
         finished_add = pyqtSignal(object, object)
@@ -1546,6 +1568,151 @@ def run_gui() -> int:
                 except Exception as e:
                     results.append((pkey, None, str(e)))
             self.finished_check.emit(results, self.net.rate_remaining)
+
+    class ColumnOrderDialog(QDialog):
+        """Dialog to reorder table columns via buttons or drag-and-drop."""
+
+        def __init__(
+            self,
+            parent: QWidget,
+            pal: Dict[str, str],
+            current_order: List[str],
+        ) -> None:
+            super().__init__(parent)
+            self.setWindowTitle("Column Order")
+            self.setFixedSize(390, 390)
+            self.pal = pal
+            self.col_titles = {cid: title for cid, title in COLS}
+            self.saved_order: List[str] = normalize_col_order(current_order)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+
+            hint = QLabel(
+                "Drag items or use the buttons below to change the left-to-right "
+                "column order (you can also drag column headers directly in the table)."
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f"color: {pal['sub_fg']}; font-size: 12px;")
+            layout.addWidget(hint)
+
+            mid = QHBoxLayout()
+            mid.setSpacing(10)
+
+            self.list_widget = QListWidget(self)
+            self.list_widget.setDragDropMode(
+                QAbstractItemView.DragDropMode.InternalMove
+            )
+            self.list_widget.setDefaultDropAction(Qt.DropAction.MoveAction)
+            self.list_widget.setStyleSheet(
+                f"QListWidget {{ background-color: {pal['field']}; color: {pal['fg']}; "
+                f"border: 1px solid {pal['border']}; border-radius: 4px; padding: 2px; }}"
+                f"QListWidget::item {{ padding: 4px 6px; }}"
+                f"QListWidget::item:selected {{ background-color: {pal['sel_bg']}; color: {pal['sel_fg']}; }}"
+            )
+            mid.addWidget(self.list_widget, 1)
+
+            side_btns = QVBoxLayout()
+            side_btns.setSpacing(6)
+
+            up_btn = QPushButton("▲  Move Left")
+            up_btn.setFixedHeight(28)
+            up_btn.clicked.connect(self._move_up)
+            side_btns.addWidget(up_btn)
+
+            down_btn = QPushButton("▼  Move Right")
+            down_btn.setFixedHeight(28)
+            down_btn.clicked.connect(self._move_down)
+            side_btns.addWidget(down_btn)
+
+            top_btn = QPushButton("⤒  Far Left")
+            top_btn.setFixedHeight(28)
+            top_btn.clicked.connect(self._move_top)
+            side_btns.addWidget(top_btn)
+
+            bot_btn = QPushButton("⤓  Far Right")
+            bot_btn.setFixedHeight(28)
+            bot_btn.clicked.connect(self._move_bottom)
+            side_btns.addWidget(bot_btn)
+
+            side_btns.addStretch(1)
+
+            reset_btn = QPushButton("Reset Default")
+            reset_btn.setFixedHeight(28)
+            reset_btn.clicked.connect(self._reset_default)
+            side_btns.addWidget(reset_btn)
+
+            mid.addLayout(side_btns)
+            layout.addLayout(mid, 1)
+
+            btns = QHBoxLayout()
+            btns.addStretch(1)
+            save_btn = QPushButton("Apply")
+            save_btn.setFixedSize(84, 28)
+            save_btn.setDefault(True)
+            save_btn.clicked.connect(self._on_save)
+            btns.addWidget(save_btn)
+
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setFixedSize(84, 28)
+            cancel_btn.clicked.connect(self.reject)
+            btns.addWidget(cancel_btn)
+            layout.addLayout(btns)
+
+            self._populate(self.saved_order)
+
+        def _populate(self, order: List[str]) -> None:
+            self.list_widget.clear()
+            for cid in normalize_col_order(order):
+                item = QListWidgetItem(self.col_titles.get(cid, cid))
+                item.setData(Qt.ItemDataRole.UserRole, cid)
+                self.list_widget.addItem(item)
+            if self.list_widget.count() > 0:
+                self.list_widget.setCurrentRow(0)
+
+        def _move_up(self) -> None:
+            row = self.list_widget.currentRow()
+            if row > 0:
+                item = self.list_widget.takeItem(row)
+                self.list_widget.insertItem(row - 1, item)
+                self.list_widget.setCurrentRow(row - 1)
+
+        def _move_down(self) -> None:
+            row = self.list_widget.currentRow()
+            if 0 <= row < self.list_widget.count() - 1:
+                item = self.list_widget.takeItem(row)
+                self.list_widget.insertItem(row + 1, item)
+                self.list_widget.setCurrentRow(row + 1)
+
+        def _move_top(self) -> None:
+            row = self.list_widget.currentRow()
+            if row > 0:
+                item = self.list_widget.takeItem(row)
+                self.list_widget.insertItem(0, item)
+                self.list_widget.setCurrentRow(0)
+
+        def _move_bottom(self) -> None:
+            row = self.list_widget.currentRow()
+            cnt = self.list_widget.count()
+            if 0 <= row < cnt - 1:
+                item = self.list_widget.takeItem(row)
+                self.list_widget.insertItem(cnt - 1, item)
+                self.list_widget.setCurrentRow(cnt - 1)
+
+        def _reset_default(self) -> None:
+            self._populate(list(DEFAULT_COL_ORDER))
+
+        def _on_save(self) -> None:
+            order: List[str] = []
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                if item is not None:
+                    cid = item.data(Qt.ItemDataRole.UserRole)
+                    if isinstance(cid, str):
+                        order.append(cid)
+            self.saved_order = normalize_col_order(order)
+            self.accept()
 
     class AboutDialog(QDialog):
         def __init__(self, parent: QWidget, pal: Dict[str, str]) -> None:
@@ -1708,7 +1875,12 @@ def run_gui() -> int:
             self.col_widths = normalize_col_widths(
                 self.data["settings"].get("col_widths")
             )
+            self.col_order = normalize_col_order(
+                self.data["settings"].get("col_order")
+            )
+            self._last_section_moved_ts = 0.0
             self.view_indices: List[int] = []
+            self.view_keys: List[str] = []
             self.worker: Optional[QThread] = None
 
             self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
@@ -1772,6 +1944,14 @@ def run_gui() -> int:
 
             row2.addStretch(1)
 
+            self.columns_btn = QPushButton("⇄  Columns")
+            self.columns_btn.setFixedHeight(30)
+            self.columns_btn.setToolTip(
+                "Change column order (you can also drag column headers directly)"
+            )
+            self.columns_btn.clicked.connect(self.show_column_order_dialog)
+            row2.addWidget(self.columns_btn)
+
             self.import_btn = QPushButton("📥  Import")
             self.import_btn.setFixedHeight(30)
             self.import_btn.clicked.connect(self.import_json)
@@ -1804,11 +1984,17 @@ def run_gui() -> int:
 
             header = self.table.horizontalHeader()
             header.setSectionsClickable(True)
+            header.setSectionsMovable(True)
+            if hasattr(header, "setFirstSectionMovable"):
+                header.setFirstSectionMovable(True)
             header.setHighlightSections(False)
             header.setStretchLastSection(False)
             header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            header.customContextMenuRequested.connect(self.on_header_context_menu)
             header.sectionClicked.connect(self.on_header_clicked)
             header.sectionResized.connect(self.on_section_resized)
+            header.sectionMoved.connect(self.on_section_moved)
 
             root.addWidget(self.table, 1)
 
@@ -1832,7 +2018,7 @@ def run_gui() -> int:
 
             # Keyboard shortcuts (Delete, F2)
             del_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)
-            del_shortcut.activated.connect(self.remove_selected)
+            del_shortcut.activated.connect(self.on_delete_key)
             f2_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F2), self.table)
             f2_shortcut.activated.connect(self.rename_selected)
 
@@ -1853,6 +2039,13 @@ def run_gui() -> int:
 
             if self.data["settings"].get("check_on_launch") and self.data["projects"]:
                 self.check_updates()
+
+        def on_delete_key(self) -> None:
+            """Handle Delete key without interrupting active text editing in a QLineEdit."""
+            fw = QApplication.focusWidget()
+            if isinstance(fw, QLineEdit) and fw.hasFocus():
+                return
+            self.remove_selected()
 
         def pal(self) -> Dict[str, str]:
             return get_palette(self.dark)
@@ -1944,19 +2137,40 @@ def run_gui() -> int:
             self.apply_theme()
             self.set_status("Dark mode" if self.dark else "Light mode")
 
-        def restore_saved_columns(self) -> None:
-            """Apply the saved column widths loaded from projects.json without rescaling."""
+        def apply_col_order(self, order: List[str]) -> None:
+            """Reorder QHeaderView visual sections to match the given column ID order."""
+            norm_order = normalize_col_order(order)
             prev = self.suppress_events
             self.suppress_events = True
-            header = self.table.horizontalHeader()
-            for i, w in enumerate(self.col_widths):
-                width = max(COL_MIN[i], int(w))
-                self.table.setColumnWidth(i, width)
-                header.resizeSection(i, width)
-            self.suppress_events = prev
+            try:
+                header = self.table.horizontalHeader()
+                id_to_logical = {cid: idx for idx, (cid, _) in enumerate(COLS)}
+                for target_vis, cid in enumerate(norm_order):
+                    logical_idx = id_to_logical[cid]
+                    curr_vis = header.visualIndex(logical_idx)
+                    if curr_vis != target_vis and curr_vis >= 0:
+                        header.moveSection(curr_vis, target_vis)
+                self.col_order = norm_order
+                self.data["settings"]["col_order"] = list(norm_order)
+            finally:
+                self.suppress_events = prev
+
+        def restore_saved_columns(self) -> None:
+            """Apply the saved column order and column widths loaded from projects.json."""
+            prev = self.suppress_events
+            self.suppress_events = True
+            try:
+                self.apply_col_order(self.col_order)
+                header = self.table.horizontalHeader()
+                for i, w in enumerate(self.col_widths):
+                    width = max(COL_MIN[i], int(w))
+                    self.table.setColumnWidth(i, width)
+                    header.resizeSection(i, width)
+            finally:
+                self.suppress_events = prev
 
         def save_current_column_widths(self) -> None:
-            """Capture current QTableWidget column widths into settings and persist."""
+            """Capture current QTableWidget column widths and column order into settings and persist."""
             header = self.table.horizontalHeader()
             widths: List[int] = []
             for i in range(len(COLS)):
@@ -1964,12 +2178,19 @@ def run_gui() -> int:
                 if w <= 0:
                     w = self.col_widths[i]
                 widths.append(max(COL_MIN[i], int(w)))
+            order: List[str] = []
+            for vis in range(len(COLS)):
+                log_idx = header.logicalIndex(vis)
+                if 0 <= log_idx < len(COLS):
+                    order.append(COLS[log_idx][0])
             self.col_widths = widths
+            self.col_order = normalize_col_order(order)
             self.data["settings"]["col_widths"] = list(widths)
+            self.data["settings"]["col_order"] = list(self.col_order)
             self.persist()
 
         def closeEvent(self, event: Any) -> None:
-            """Save column widths and application state to projects.json on exit."""
+            """Save column widths, column order, and application state to projects.json on exit."""
             self.save_current_column_widths()
             super().closeEvent(event)
 
@@ -1981,15 +2202,101 @@ def run_gui() -> int:
                 self.data["settings"]["col_widths"] = list(self.col_widths)
                 self.persist()
 
+        def on_section_moved(
+            self, logical_index: int, _old_visual: int, new_visual: int
+        ) -> None:
+            if self.suppress_events:
+                return
+            self._last_section_moved_ts = time.monotonic()
+            self.save_current_column_widths()
+            if 0 <= logical_index < len(COLS):
+                col_title = COLS[logical_index][1]
+                self.set_status(
+                    f"Moved '{col_title}' column to position {new_visual + 1}."
+                )
+
+        def move_column_visual(self, from_vis: int, to_vis: int) -> None:
+            if not (0 <= from_vis < len(COLS) and 0 <= to_vis < len(COLS)):
+                return
+            if from_vis == to_vis:
+                return
+            header = self.table.horizontalHeader()
+            header.moveSection(from_vis, to_vis)
+
+        def reset_column_order(self) -> None:
+            self.apply_col_order(list(DEFAULT_COL_ORDER))
+            self.save_current_column_widths()
+            self.set_status("Column order reset to default.")
+
+        def show_column_order_dialog(self) -> None:
+            dlg = ColumnOrderDialog(self, self.pal(), self.col_order)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self.apply_col_order(dlg.saved_order)
+                self.save_current_column_widths()
+                self.set_status("Column order updated.")
+
+        def on_header_context_menu(self, pos: Any) -> None:
+            header = self.table.horizontalHeader()
+            logical_idx = header.logicalIndexAt(pos)
+            menu = QMenu(self)
+
+            if 0 <= logical_idx < len(COLS):
+                vis_idx = header.visualIndex(logical_idx)
+                col_title = COLS[logical_idx][1]
+
+                act_left = QAction(f"Move '{col_title}' Left", self)
+                act_left.setEnabled(vis_idx > 0)
+                act_left.triggered.connect(
+                    lambda _checked=False, v=vis_idx: self.move_column_visual(v, v - 1)
+                )
+                menu.addAction(act_left)
+
+                act_right = QAction(f"Move '{col_title}' Right", self)
+                act_right.setEnabled(vis_idx < len(COLS) - 1)
+                act_right.triggered.connect(
+                    lambda _checked=False, v=vis_idx: self.move_column_visual(v, v + 1)
+                )
+                menu.addAction(act_right)
+
+                act_first = QAction(f"Move '{col_title}' to Far Left", self)
+                act_first.setEnabled(vis_idx > 0)
+                act_first.triggered.connect(
+                    lambda _checked=False, v=vis_idx: self.move_column_visual(v, 0)
+                )
+                menu.addAction(act_first)
+
+                act_last = QAction(f"Move '{col_title}' to Far Right", self)
+                act_last.setEnabled(vis_idx < len(COLS) - 1)
+                act_last.triggered.connect(
+                    lambda _checked=False, v=vis_idx: self.move_column_visual(
+                        v, len(COLS) - 1
+                    )
+                )
+                menu.addAction(act_last)
+                menu.addSeparator()
+
+            act_dlg = QAction("Configure Column Order...", self)
+            act_dlg.triggered.connect(self.show_column_order_dialog)
+            menu.addAction(act_dlg)
+
+            act_reset = QAction("Reset Column Order to Default", self)
+            act_reset.setEnabled(list(self.col_order) != list(DEFAULT_COL_ORDER))
+            act_reset.triggered.connect(self.reset_column_order)
+            menu.addAction(act_reset)
+
+            menu.exec(header.mapToGlobal(pos))
+
         def selected_keys(self) -> List[str]:
             rows = sorted({idx.row() for idx in self.table.selectedIndexes()})
             if not rows and self.table.currentRow() >= 0:
                 rows = [self.table.currentRow()]
+            existing_keys = {project_key(p) for p in self.data["projects"]}
             keys: List[str] = []
             for r in rows:
-                if 0 <= r < len(self.view_indices):
-                    p = self.data["projects"][self.view_indices[r]]
-                    keys.append(project_key(p))
+                if 0 <= r < len(self.view_keys):
+                    k = self.view_keys[r]
+                    if k in existing_keys and k not in keys:
+                        keys.append(k)
             return keys
 
         def update_headings(self) -> None:
@@ -2003,8 +2310,18 @@ def run_gui() -> int:
                 else:
                     labels.append(title)
             self.table.setHorizontalHeaderLabels(labels)
+            for i in range(len(COLS)):
+                hi = self.table.horizontalHeaderItem(i)
+                if hi is not None:
+                    hi.setToolTip(
+                        "Click to sort • Drag header or right-click to change column order"
+                    )
 
         def on_header_clicked(self, col_idx: int) -> None:
+            if time.monotonic() - self._last_section_moved_ts < 0.25:
+                return
+            if not (0 <= col_idx < len(COLS)):
+                return
             cid = COLS[col_idx][0]
             if cid not in SORTABLE:
                 return
@@ -2019,130 +2336,165 @@ def run_gui() -> int:
             self.update_headings()
             self.render_table()
 
+        def _clear_table_widgets(self) -> None:
+            """Safely detach cell widgets and clear focus before shrinking or rebuilding rows."""
+            fw = QApplication.focusWidget()
+            if fw is not None and (fw is self.table or self.table.isAncestorOf(fw)):
+                self.entry_edit.setFocus()
+            rows = self.table.rowCount()
+            cols = self.table.columnCount()
+            for r in range(rows):
+                for c in range(cols):
+                    w = self.table.cellWidget(r, c)
+                    if w is not None:
+                        w.blockSignals(True)
+                        filt = getattr(w, "_row_filter", None)
+                        if filt is not None:
+                            w.removeEventFilter(filt)
+                            setattr(w, "_row_filter", None)
+                        self.table.removeCellWidget(r, c)
+            self.table.clearSelection()
+            self.table.setCurrentCell(-1, -1)
+            self.table.setRowCount(0)
+
+        def _attach_row_filter(self, widget: QWidget, row: int) -> None:
+            filt = RowSelectFilter(self, widget, row)
+            setattr(widget, "_row_filter", filt)
+            widget.installEventFilter(filt)
+
         def render_table(self) -> None:
             keep = set(self.selected_keys())
             prev_suppress = self.suppress_events
             self.suppress_events = True
-            self.view_indices = sort_order(
-                self.data["projects"],
-                self.data["settings"].get("sort_col", ""),
-                self.data["settings"].get("sort_asc", True),
-            )
-            p = self.pal()
-            self.table.setRowCount(len(self.view_indices))
-
-            for row, ix in enumerate(self.view_indices):
-                proj = self.data["projects"][ix]
-                pkey = project_key(proj)
-
-                bg_color = QColor(p["field"])
-                fg_color = QColor(p["fg"])
-                if proj.get("error"):
-                    fg_color = QColor(p["error_fg"])
-                elif has_update(proj):
-                    bg_color = QColor(p["update_bg"])
-                    fg_color = QColor(p["update_fg"])
-                elif not proj.get("latest"):
-                    fg_color = QColor(p["none_fg"])
-
-                texts = [
-                    str(proj.get("user_title", "")),
-                    display_name(proj),
-                    repo_display_label(proj),
-                    proj.get("source", "PC"),
-                    proj.get("target", "PC"),
-                    release_label(proj),
-                    published_label(proj),
-                    status_text(proj),
-                    checked_label(proj),
-                    str(proj.get("comment", "")),
+            try:
+                self._clear_table_widgets()
+                self.view_indices = sort_order(
+                    self.data["projects"],
+                    self.data["settings"].get("sort_col", ""),
+                    self.data["settings"].get("sort_asc", True),
+                )
+                self.view_keys = [
+                    project_key(self.data["projects"][ix])
+                    for ix in self.view_indices
+                    if 0 <= ix < len(self.data["projects"])
                 ]
+                p = self.pal()
+                self.table.setRowCount(len(self.view_indices))
 
-                row_filter = RowSelectFilter(self.table, row)
+                for row, ix in enumerate(self.view_indices):
+                    proj = self.data["projects"][ix]
+                    pkey = project_key(proj)
 
-                for col, text in enumerate(texts):
-                    if col == 0:
-                        # Col 0: Free-text Title column at the very left
-                        title_edit = QLineEdit(text, self.table)
-                        title_edit.setMaxLength(MAX_TITLE_LEN)
-                        title_edit.setPlaceholderText("Add title...")
-                        title_edit.setFrame(False)
-                        title_edit.setStyleSheet(
-                            f"background: transparent; color: {p['fg']}; border: none; padding: 1px 4px;"
-                        )
-                        title_edit.installEventFilter(row_filter)
-                        title_edit.textEdited.connect(
-                            lambda val, k=pkey: self.on_user_title_text_changed(k, val)
-                        )
-                        title_edit.editingFinished.connect(
-                            lambda ed=title_edit, k=pkey: self.on_user_title_edited(
-                                k, ed.text()
+                    bg_color = QColor(p["field"])
+                    fg_color = QColor(p["fg"])
+                    if proj.get("error"):
+                        fg_color = QColor(p["error_fg"])
+                    elif has_update(proj):
+                        bg_color = QColor(p["update_bg"])
+                        fg_color = QColor(p["update_fg"])
+                    elif not proj.get("latest"):
+                        fg_color = QColor(p["none_fg"])
+
+                    texts = [
+                        str(proj.get("user_title", "")),
+                        display_name(proj),
+                        repo_display_label(proj),
+                        proj.get("source", "PC"),
+                        proj.get("target", "PC"),
+                        release_label(proj),
+                        published_label(proj),
+                        status_text(proj),
+                        checked_label(proj),
+                        str(proj.get("comment", "")),
+                    ]
+
+                    for col, text in enumerate(texts):
+                        if col == 0:
+                            # Col 0: Free-text Title column
+                            title_edit = QLineEdit(text, self.table)
+                            title_edit.setMaxLength(MAX_TITLE_LEN)
+                            title_edit.setPlaceholderText("Add title...")
+                            title_edit.setFrame(False)
+                            title_edit.setStyleSheet(
+                                f"background: transparent; color: {p['fg']}; border: none; padding: 1px 4px;"
                             )
-                        )
-                        self.table.setCellWidget(row, col, title_edit)
-                        bg_item = QTableWidgetItem("")
-                        bg_item.setBackground(bg_color)
-                        bg_item.setForeground(fg_color)
-                        bg_item.setFlags(bg_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                        self.table.setItem(row, col, bg_item)
-                    elif col in (3, 4):
-                        # Col 3: Source (PC, Android, Switch, Switch 2, PS5, PS4, PS3, Xbox, Wii, Wii U) | Col 4: Target
-                        field_name = "source" if col == 3 else "target"
-                        choices = SOURCE_PLATFORMS if col == 3 else TARGET_PLATFORMS
-                        combo = QComboBox(self.table)
-                        combo.addItems(list(choices))
-                        curr_val = (
-                            normalize_source_platform(proj.get(field_name))
-                            if col == 3
-                            else normalize_target_platform(proj.get(field_name))
-                        )
-                        combo.setCurrentText(curr_val)
-                        combo.installEventFilter(row_filter)
-                        combo.currentTextChanged.connect(
-                            lambda val, k=pkey, f=field_name: self.on_platform_changed(
-                                k, f, val
+                            self._attach_row_filter(title_edit, row)
+                            title_edit.textEdited.connect(
+                                lambda val, k=pkey: self.on_user_title_text_changed(
+                                    k, val
+                                )
                             )
-                        )
-                        self.table.setCellWidget(row, col, combo)
-                    elif col == 9:
-                        # Col 9: Free-text Comment column at the far right
-                        comment_edit = QLineEdit(text, self.table)
-                        comment_edit.setMaxLength(MAX_COMMENT_LEN)
-                        comment_edit.setPlaceholderText("Add comment...")
-                        comment_edit.setFrame(False)
-                        comment_edit.setStyleSheet(
-                            f"background: transparent; color: {p['fg']}; border: none; padding: 1px 4px;"
-                        )
-                        comment_edit.installEventFilter(row_filter)
-                        comment_edit.textEdited.connect(
-                            lambda val, k=pkey: self.on_comment_text_changed(k, val)
-                        )
-                        comment_edit.editingFinished.connect(
-                            lambda ed=comment_edit, k=pkey: self.on_comment_edited(
-                                k, ed.text()
+                            self.table.setCellWidget(row, col, title_edit)
+                            bg_item = QTableWidgetItem("")
+                            bg_item.setBackground(bg_color)
+                            bg_item.setForeground(fg_color)
+                            bg_item.setFlags(
+                                bg_item.flags() & ~Qt.ItemFlag.ItemIsEditable
                             )
-                        )
-                        self.table.setCellWidget(row, col, comment_edit)
-                        bg_item = QTableWidgetItem("")
-                        bg_item.setBackground(bg_color)
-                        bg_item.setForeground(fg_color)
-                        bg_item.setFlags(bg_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                        self.table.setItem(row, col, bg_item)
-                    else:
-                        item = QTableWidgetItem(text)
-                        item.setBackground(bg_color)
-                        item.setForeground(fg_color)
-                        if col == 1:
-                            # Col 1: Project name (editable via F2 / double-click)
-                            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                            self.table.setItem(row, col, bg_item)
+                        elif col in (3, 4):
+                            # Col 3: Source | Col 4: Target
+                            field_name = "source" if col == 3 else "target"
+                            choices = (
+                                SOURCE_PLATFORMS if col == 3 else TARGET_PLATFORMS
+                            )
+                            combo = QComboBox(self.table)
+                            combo.addItems(list(choices))
+                            curr_val = (
+                                normalize_source_platform(proj.get(field_name))
+                                if col == 3
+                                else normalize_target_platform(proj.get(field_name))
+                            )
+                            combo.setCurrentText(curr_val)
+                            self._attach_row_filter(combo, row)
+                            combo.currentTextChanged.connect(
+                                lambda val, k=pkey, f=field_name: self.on_platform_changed(
+                                    k, f, val
+                                )
+                            )
+                            self.table.setCellWidget(row, col, combo)
+                        elif col == 9:
+                            # Col 9: Free-text Comment column
+                            comment_edit = QLineEdit(text, self.table)
+                            comment_edit.setMaxLength(MAX_COMMENT_LEN)
+                            comment_edit.setPlaceholderText("Add comment...")
+                            comment_edit.setFrame(False)
+                            comment_edit.setStyleSheet(
+                                f"background: transparent; color: {p['fg']}; border: none; padding: 1px 4px;"
+                            )
+                            self._attach_row_filter(comment_edit, row)
+                            comment_edit.textEdited.connect(
+                                lambda val, k=pkey: self.on_comment_text_changed(
+                                    k, val
+                                )
+                            )
+                            self.table.setCellWidget(row, col, comment_edit)
+                            bg_item = QTableWidgetItem("")
+                            bg_item.setBackground(bg_color)
+                            bg_item.setForeground(fg_color)
+                            bg_item.setFlags(
+                                bg_item.flags() & ~Qt.ItemFlag.ItemIsEditable
+                            )
+                            self.table.setItem(row, col, bg_item)
                         else:
-                            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                        self.table.setItem(row, col, item)
+                            item = QTableWidgetItem(text)
+                            item.setBackground(bg_color)
+                            item.setForeground(fg_color)
+                            if col == 1:
+                                # Col 1: Project name (editable via F2 / double-click)
+                                item.setFlags(
+                                    item.flags() | Qt.ItemFlag.ItemIsEditable
+                                )
+                            else:
+                                item.setFlags(
+                                    item.flags() & ~Qt.ItemFlag.ItemIsEditable
+                                )
+                            self.table.setItem(row, col, item)
 
-                if pkey in keep:
-                    self.table.selectRow(row)
-
-            self.suppress_events = prev_suppress
+                    if pkey in keep:
+                        self.table.selectRow(row)
+            finally:
+                self.suppress_events = prev_suppress
 
         def on_user_title_text_changed(self, pkey: str, text: str) -> None:
             if self.suppress_events:
@@ -2430,6 +2782,9 @@ def run_gui() -> int:
             if not keys:
                 self.set_status("Select a project first.")
                 return
+            fw = QApplication.focusWidget()
+            if fw is not None and (fw is self.table or self.table.isAncestorOf(fw)):
+                self.entry_edit.setFocus()
             names_list = [
                 display_name(p) for p in self.data["projects"] if project_key(p) in keys
             ]
@@ -2446,6 +2801,8 @@ def run_gui() -> int:
             self.data["projects"] = [
                 p for p in self.data["projects"] if project_key(p) not in key_set
             ]
+            self.view_indices = []
+            self.view_keys = []
             self.persist()
             self.render_table()
             self.set_status(f"Removed {len(keys)} project(s).")
@@ -2464,12 +2821,14 @@ def run_gui() -> int:
                 return
             row = item.row()
             if 0 <= row < len(self.view_indices):
-                proj = self.data["projects"][self.view_indices[row]]
-                msg = apply_rename(proj, item.text())
-                self.persist()
-                self.render_table()
-                if msg:
-                    self.set_status(msg)
+                idx = self.view_indices[row]
+                if 0 <= idx < len(self.data["projects"]):
+                    proj = self.data["projects"][idx]
+                    msg = apply_rename(proj, item.text())
+                    self.persist()
+                    self.render_table()
+                    if msg:
+                        self.set_status(msg)
 
         def reset_names(self) -> None:
             keys = set(self.selected_keys())
@@ -2625,6 +2984,8 @@ def run_gui() -> int:
                 msg = f"Imported: {added} new project(s) added, {total - added} already in the list."
             elif ans == QMessageBox.StandardButton.No:
                 self.data["projects"] = projects
+                self.view_indices = []
+                self.view_keys = []
                 msg = f"Imported: list replaced with {len(projects)} project(s)."
             else:
                 return
@@ -3126,6 +3487,34 @@ class TestPortableTracker(unittest.TestCase):
         self.assertEqual(sum(w), 1600)
         for a, b in zip(w, COL_MIN):
             self.assertGreaterEqual(a, b)
+
+    def test_column_order_persistence_and_normalization(self) -> None:
+        self.assertEqual(list(DEFAULT_COL_ORDER), [cid for cid, _ in COLS])
+        custom_order = [
+            "source",
+            "target",
+            "user_title",
+            "name",
+            "repo",
+            "release",
+            "published",
+            "status",
+            "checked",
+            "comment",
+        ]
+        self.assertEqual(normalize_col_order(custom_order), custom_order)
+        # Partial or invalid column order is normalized with remaining columns appended
+        partial = ["comment", "invalid_col", "name", "comment"]
+        norm_partial = normalize_col_order(partial)
+        self.assertEqual(len(norm_partial), len(COLS))
+        self.assertEqual(norm_partial[0], "comment")
+        self.assertEqual(norm_partial[1], "name")
+
+        # Persistence round-trip via parse_data
+        raw = json.dumps({"settings": {"col_order": custom_order}, "projects": []})
+        loaded = parse_data(raw)
+        assert loaded is not None
+        self.assertEqual(loaded["settings"]["col_order"], custom_order)
 
 
 def main() -> int:
