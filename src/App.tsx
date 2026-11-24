@@ -10,10 +10,12 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Search,
   Settings as SettingsIcon,
   Sun,
   Trash2,
   Upload,
+  X,
 } from 'lucide-react';
 import {
   APP_NAME,
@@ -44,6 +46,7 @@ import {
   defaultPlatform,
   displayName,
   fetchRepoInfo,
+  filterIndices,
   getLatest,
   getRateRemaining,
   GitHubError,
@@ -172,6 +175,8 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [entryText, setEntryText] = useState('');
   const [entryFocused, setEntryFocused] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchFocused, setSearchFocused] = useState(false);
   const [busy, setBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState('Add a project to get started.');
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
@@ -208,6 +213,7 @@ export default function App() {
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const dragColRef = useRef<{ colIdx: number; startX: number; startWidths: number[] } | null>(null);
 
   const isDark = useMemo(() => {
@@ -384,11 +390,11 @@ export default function App() {
     setModal({ type: 'column_order' });
   };
 
-  // Sorted view indices
-  const viewIndices = useMemo(
-    () => sortOrder(data.projects, data.settings.sort_col, data.settings.sort_asc),
-    [data.projects, data.settings.sort_col, data.settings.sort_asc]
-  );
+  // Sorted and search-filtered view indices (looks across all 10 columns for matching keyword)
+  const viewIndices = useMemo(() => {
+    const sorted = sortOrder(data.projects, data.settings.sort_col, data.settings.sort_asc);
+    return filterIndices(data.projects, sorted, searchQuery);
+  }, [data.projects, data.settings.sort_col, data.settings.sort_asc, searchQuery]);
 
   // Close context menu on window click
   useEffect(() => {
@@ -1164,10 +1170,17 @@ export default function App() {
     handleRunExeBuilder();
   };
 
-  // Keyboard shortcuts on list view (Delete, F2)
+  // Keyboard shortcuts on list view (Delete, F2, Ctrl+F)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (modal.type !== 'none' || editingKey) return;
+      if (modal.type !== 'none') return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+      if (editingKey) return;
       const activeTag = document.activeElement?.tagName.toLowerCase();
       if (activeTag === 'input' || activeTag === 'select' || activeTag === 'textarea') return;
       if (e.key === 'Delete' && selectedKeys.length > 0) {
@@ -1261,7 +1274,7 @@ export default function App() {
         onChange={handleImportFileChange}
       />
 
-      {/* Row 1: GitHub project label + entry box + Add project button */}
+      {/* Row 1: GitHub project label + entry box + Add project button + Top Search across all columns */}
       <div className="flex items-center gap-[8px] h-[28px] shrink-0">
         <label
           htmlFor="repo-entry"
@@ -1276,7 +1289,7 @@ export default function App() {
             backgroundColor: pal.field,
             borderColor: entryFocused ? pal.sel_bg : pal.border,
           }}
-          className="flex-1 h-[28px] rounded-[4px] border flex items-center px-[8px]"
+          className="flex-[3] min-w-[180px] h-[28px] rounded-[4px] border flex items-center px-[8px]"
         >
           <input
             id="repo-entry"
@@ -1317,6 +1330,90 @@ export default function App() {
           <Plus size={14} />
           <span>Add project</span>
         </button>
+
+        {/* Top Search Box: looks at all 10 columns for matching keyword */}
+        <label
+          htmlFor="column-search"
+          style={{ color: pal.fg }}
+          className="text-[13px] whitespace-nowrap shrink-0 ml-1 flex items-center gap-1"
+        >
+          <Search size={13} />
+          <span>Search:</span>
+        </label>
+
+        <div
+          style={{
+            backgroundColor: pal.field,
+            borderColor: searchFocused ? pal.sel_bg : pal.border,
+          }}
+          className="flex-[2] min-w-[220px] h-[28px] rounded-[4px] border flex items-center px-[8px] gap-1.5"
+        >
+          <input
+            ref={searchInputRef}
+            id="column-search"
+            type="text"
+            maxLength={200}
+            value={searchQuery}
+            onFocus={() => setSearchFocused(true)}
+            onBlur={() => setSearchFocused(false)}
+            onChange={(e) => {
+              const nextVal = e.target.value;
+              setSearchQuery(nextVal);
+              const q = nextVal.trim();
+              if (q) {
+                const matched = filterIndices(
+                  data.projects,
+                  data.projects.map((_, i) => i),
+                  q
+                ).length;
+                setStatusMsg(
+                  `Showing ${matched} of ${data.projects.length} project(s) matching '${q}'.`
+                );
+              } else {
+                setStatusMsg(`Showing all ${data.projects.length} project(s).`);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape' && searchQuery) {
+                e.preventDefault();
+                setSearchQuery('');
+                setStatusMsg(`Showing all ${data.projects.length} project(s).`);
+              }
+            }}
+            placeholder="Search all columns (Title, Project, Repo, Source, Target, Release, Status, Comment)..."
+            title="Filter projects by keyword across all 10 columns (Ctrl+F)"
+            style={{
+              backgroundColor: 'transparent',
+              color: pal.fg,
+            }}
+            className="w-full h-[20px] outline-none border-none text-[13px] select-text placeholder:opacity-45"
+          />
+
+          {searchQuery.trim() && (
+            <span
+              style={{ color: pal.sub_fg }}
+              className="text-[11.5px] tabular-nums whitespace-nowrap shrink-0"
+            >
+              {viewIndices.length} / {data.projects.length}
+            </span>
+          )}
+
+          {searchQuery && (
+            <button
+              type="button"
+              title="Clear search (Esc)"
+              onClick={() => {
+                setSearchQuery('');
+                setStatusMsg(`Showing all ${data.projects.length} project(s).`);
+                searchInputRef.current?.focus();
+              }}
+              style={{ color: pal.sub_fg }}
+              className="w-[18px] h-[18px] flex items-center justify-center rounded-[2px] hover:opacity-100 opacity-75 cursor-pointer shrink-0"
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Row 2: Toolbar buttons (Left: Check, Mark as seen, Open release page, Remove | Right: Columns, README, Build .exe, Import, Export, Settings) */}
@@ -1511,6 +1608,25 @@ export default function App() {
             }
           }}
         >
+          {viewIndices.length === 0 && searchQuery.trim() && data.projects.length > 0 && (
+            <div
+              style={{ color: pal.sub_fg }}
+              className="flex items-center gap-2 px-3 py-3 text-[13px]"
+            >
+              <span>No projects match &ldquo;{searchQuery.trim()}&rdquo; across any column.</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setStatusMsg(`Showing all ${data.projects.length} project(s).`);
+                }}
+                style={{ color: pal.link }}
+                className="underline cursor-pointer"
+              >
+                Clear search
+              </button>
+            </div>
+          )}
           {viewIndices.map((projIdx) => {
             const p = data.projects[projIdx];
             if (!p) return null;

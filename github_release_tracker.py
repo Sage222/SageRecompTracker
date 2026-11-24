@@ -897,6 +897,56 @@ def sort_order(projects: List[Dict[str, Any]], col: str, asc: bool) -> List[int]
     return idx
 
 
+def project_column_texts(p: Dict[str, Any]) -> List[str]:
+    """Return the visible text values of all 10 table columns for a project row."""
+    return [
+        str(p.get("user_title", "")),
+        display_name(p),
+        repo_display_label(p),
+        str(p.get("source", "PC")),
+        str(p.get("target", "PC")),
+        release_label(p),
+        published_label(p),
+        status_text(p),
+        checked_label(p),
+        str(p.get("comment", "")),
+    ]
+
+
+def project_matches_search(p: Dict[str, Any], query: str) -> bool:
+    """Return True if all keyword tokens in query match across any of the 10 columns of project p."""
+    if not isinstance(query, str):
+        return True
+    q = query.strip().lower()
+    if not q:
+        return True
+    latest = p.get("latest") if isinstance(p.get("latest"), dict) else {}
+    parts = project_column_texts(p) + [
+        str(p.get("title", "")),
+        str(p.get("custom_name", "")),
+        f"{p.get('owner', '')}/{p.get('repo', '')}",
+        str(p.get("html_url", "")),
+        str(latest.get("tag", "")) if isinstance(latest, dict) else "",
+        str(latest.get("name", "")) if isinstance(latest, dict) else "",
+    ]
+    haystack = "\n".join(parts).lower()
+    tokens = [tok for tok in q.split() if tok]
+    return all(tok in haystack for tok in tokens)
+
+
+def filter_indices(
+    projects: List[Dict[str, Any]], indices: List[int], query: str
+) -> List[int]:
+    """Filter sorted project indices by a search query across all columns."""
+    if not isinstance(query, str) or not query.strip():
+        return list(indices)
+    return [
+        ix
+        for ix in indices
+        if 0 <= ix < len(projects) and project_matches_search(projects[ix], query)
+    ]
+
+
 def layout_columns(base: Tuple[int, ...], low: Tuple[int, ...], avail: int) -> List[int]:
     total_pref = sum(base)
     total_low = sum(low)
@@ -1879,6 +1929,7 @@ def run_gui() -> int:
                 self.data["settings"].get("col_order")
             )
             self._last_section_moved_ts = 0.0
+            self.search_query = ""
             self.view_indices: List[int] = []
             self.view_keys: List[str] = []
             self.worker: Optional[QThread] = None
@@ -1897,7 +1948,7 @@ def run_gui() -> int:
             root.setContentsMargins(10, 10, 10, 8)
             root.setSpacing(6)
 
-            # Row 1: Project URL / owner/repo entry + Add project
+            # Row 1: Project URL / owner/repo entry + Add project + Top Search Bar across all columns
             row1 = QHBoxLayout()
             row1.setSpacing(8)
             self.entry_label = QLabel("Project (GitHub/Forgejo URL, download page, or owner/repo):")
@@ -1910,12 +1961,35 @@ def run_gui() -> int:
                 "owner/repo, https://git.magicbean.dev/MagicBeanDev/Longshot, or https://eden-emu.dev/downloads/"
             )
             self.entry_edit.returnPressed.connect(self.add_project)
-            row1.addWidget(self.entry_edit, 1)
+            row1.addWidget(self.entry_edit, 3)
 
             self.add_btn = QPushButton("+  Add project")
             self.add_btn.setFixedHeight(28)
             self.add_btn.clicked.connect(self.add_project)
             row1.addWidget(self.add_btn)
+
+            self.search_label = QLabel("🔍 Search:")
+            row1.addWidget(self.search_label)
+
+            self.search_edit = QLineEdit()
+            self.search_edit.setMaxLength(200)
+            self.search_edit.setFixedHeight(28)
+            self.search_edit.setMinimumWidth(220)
+            self.search_edit.setClearButtonEnabled(True)
+            self.search_edit.setPlaceholderText(
+                "Search all columns (Title, Project, Repo, Source, Target, Release, Status, Comment)..."
+            )
+            self.search_edit.setToolTip(
+                "Filter projects by keyword across all 10 columns (Ctrl+F)"
+            )
+            self.search_edit.textChanged.connect(self.on_search_changed)
+            row1.addWidget(self.search_edit, 2)
+
+            self.search_count_lbl = QLabel("")
+            self.search_count_lbl.setFixedHeight(28)
+            self.search_count_lbl.setVisible(False)
+            row1.addWidget(self.search_count_lbl)
+
             root.addLayout(row1)
 
             # Row 2: Toolbar buttons
@@ -2016,11 +2090,13 @@ def run_gui() -> int:
             row4.addWidget(self.theme_btn)
             root.addLayout(row4)
 
-            # Keyboard shortcuts (Delete, F2)
+            # Keyboard shortcuts (Delete, F2, Ctrl+F)
             del_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)
             del_shortcut.activated.connect(self.on_delete_key)
             f2_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F2), self.table)
             f2_shortcut.activated.connect(self.rename_selected)
+            find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+            find_shortcut.activated.connect(self.focus_search)
 
             self.apply_theme()
             self.update_headings()
@@ -2039,6 +2115,27 @@ def run_gui() -> int:
 
             if self.data["settings"].get("check_on_launch") and self.data["projects"]:
                 self.check_updates()
+
+        def focus_search(self) -> None:
+            self.search_edit.setFocus()
+            self.search_edit.selectAll()
+
+        def on_search_changed(self, text: str) -> None:
+            self.search_query = text
+            self.render_table()
+            q = text.strip()
+            total = len(self.data["projects"])
+            matched = len(self.view_indices)
+            if q:
+                self.search_count_lbl.setText(f"{matched} / {total}")
+                self.search_count_lbl.setVisible(True)
+                self.set_status(
+                    f"Showing {matched} of {total} project(s) matching '{q}'."
+                )
+            else:
+                self.search_count_lbl.setText("")
+                self.search_count_lbl.setVisible(False)
+                self.set_status(f"Showing all {total} project(s).")
 
         def on_delete_key(self) -> None:
             """Handle Delete key without interrupting active text editing in a QLineEdit."""
@@ -2368,16 +2465,28 @@ def run_gui() -> int:
             self.suppress_events = True
             try:
                 self._clear_table_widgets()
-                self.view_indices = sort_order(
+                sorted_indices = sort_order(
                     self.data["projects"],
                     self.data["settings"].get("sort_col", ""),
                     self.data["settings"].get("sort_asc", True),
+                )
+                self.view_indices = filter_indices(
+                    self.data["projects"], sorted_indices, self.search_query
                 )
                 self.view_keys = [
                     project_key(self.data["projects"][ix])
                     for ix in self.view_indices
                     if 0 <= ix < len(self.data["projects"])
                 ]
+                q = self.search_query.strip()
+                if q:
+                    self.search_count_lbl.setText(
+                        f"{len(self.view_indices)} / {len(self.data['projects'])}"
+                    )
+                    self.search_count_lbl.setVisible(True)
+                else:
+                    self.search_count_lbl.setText("")
+                    self.search_count_lbl.setVisible(False)
                 p = self.pal()
                 self.table.setRowCount(len(self.view_indices))
 
@@ -3515,6 +3624,73 @@ class TestPortableTracker(unittest.TestCase):
         loaded = parse_data(raw)
         assert loaded is not None
         self.assertEqual(loaded["settings"]["col_order"], custom_order)
+
+    def test_search_across_all_columns(self) -> None:
+        p1 = normalize_project(
+            {
+                "owner": "Ryubing",
+                "repo": "Ryujinx",
+                "title": "Ryujinx",
+                "user_title": "Handheld Emu",
+                "source": "Switch 2",
+                "target": "PC",
+                "comment": "Check shader cache",
+                "latest": {
+                    "id": "v1.2.82",
+                    "tag": "v1.2.82",
+                    "name": "1.2.82",
+                    "published_at": "2025-02-18T10:00:00Z",
+                    "url": "https://github.com/Ryubing/Ryujinx/releases/tag/v1.2.82",
+                    "prerelease": False,
+                    "source": "release",
+                },
+                "seen_id": "v1.2.80",
+                "seen_tag": "v1.2.80",
+                "last_checked": "2025-02-20T14:30:00Z",
+                "fmt": 2,
+            }
+        )
+        p2 = normalize_project(
+            {
+                "owner": "MagicBeanDev",
+                "repo": "Longshot",
+                "html_url": "https://git.magicbean.dev/MagicBeanDev/Longshot",
+                "title": "Longshot",
+                "user_title": "Retro Tool",
+                "source": "Wii U",
+                "target": "Android",
+                "comment": "Forgejo host",
+                "latest": {
+                    "id": "v0.9.1",
+                    "tag": "v0.9.1",
+                    "name": "0.9.1",
+                    "published_at": "2025-01-11T08:00:00Z",
+                    "url": "https://git.magicbean.dev/MagicBeanDev/Longshot/releases/tag/v0.9.1",
+                    "prerelease": False,
+                    "source": "release",
+                },
+                "seen_id": "v0.9.1",
+                "seen_tag": "v0.9.1",
+                "last_checked": "2025-02-19T09:15:00Z",
+                "fmt": 2,
+            }
+        )
+        assert p1 is not None and p2 is not None
+        projects = [p1, p2]
+        base_idx = [0, 1]
+
+        # Matches each of the 10 columns (Title, Project, Repo, Source, Target, Release, Published, Status, Checked, Comment)
+        self.assertEqual(filter_indices(projects, base_idx, "Handheld"), [0])       # Col 0: Title
+        self.assertEqual(filter_indices(projects, base_idx, "Longshot"), [1])       # Col 1: Project
+        self.assertEqual(filter_indices(projects, base_idx, "magicbean.dev"), [1])  # Col 2: Repository
+        self.assertEqual(filter_indices(projects, base_idx, "Wii U"), [1])          # Col 3: Source
+        self.assertEqual(filter_indices(projects, base_idx, "Android"), [1])        # Col 4: Target
+        self.assertEqual(filter_indices(projects, base_idx, "v1.2.82"), [0])        # Col 5: Current release
+        self.assertEqual(filter_indices(projects, base_idx, "2025-02-18"), [0])     # Col 6: Published
+        self.assertEqual(filter_indices(projects, base_idx, "Update available"), [0])  # Col 7: Status
+        self.assertEqual(filter_indices(projects, base_idx, "2025-02-19 09:15"), [1])  # Col 8: Last checked
+        self.assertEqual(filter_indices(projects, base_idx, "shader cache"), [0])   # Col 9: Comment
+        self.assertEqual(filter_indices(projects, base_idx, ""), [0, 1])
 
 
 def main() -> int:

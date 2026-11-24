@@ -2,15 +2,16 @@
 
 A small, portable desktop app contained in a **single Python file (`github_release_tracker.py`)** using **Python 3** and **PyQt6** that tracks the latest release of the GitHub projects you care about and tells you when a new one appears. No account, no login, and no token needed.
 
-> **Portable Single-File PyQt6 Edition:** Based on **[github-release-tracker-rs](https://github.com/santosasarno-code/github-release-tracker-rs)**, ported to a single self-contained **Python + PyQt6** file (`github_release_tracker.py`) with full `projects.json` compatibility, a free-text **Title** column at the very left, a free-text **Comment** column at the far right, configurable **Source** and **Target** platform columns via drop-down box, customizable **Column Order** (drag-and-drop or dialog), multi-site release tracking (GitHub, Forgejo/Gitea, and download pages), and crash-free row removal with confirmation.
+> **Portable Single-File PyQt6 Edition:** Based on **[github-release-tracker-rs](https://github.com/santosasarno-code/github-release-tracker-rs)**, ported to a single self-contained **Python + PyQt6** file (`github_release_tracker.py`) with full `projects.json` compatibility, a top **Search** bar that filters across all 10 columns, a free-text **Title** column at the very left, a free-text **Comment** column at the far right, configurable **Source** and **Target** platform columns via drop-down box, customizable **Column Order** (drag-and-drop or dialog), multi-site release tracking (GitHub, Forgejo/Gitea, and download pages), and crash-free row removal with confirmation.
 
 ## Portable Single-File Design
 
-- **Single `.py` File**: All core logic (GitHub, Forgejo/Gitea, and download page release & feed parsers, `Source` & `Target` platform validation, atomic JSON persistence, sorting, column width & order persistence), the full **PyQt6 GUI**, an automatic `icon.ico` generator, a built-in PyInstaller `.exe` builder (`--build-exe`), and a 12-test `unittest` suite (`--test`) live inside one standalone file: **`github_release_tracker.py`**.
+- **Single `.py` File**: All core logic (GitHub, Forgejo/Gitea, and download page release & feed parsers, `Source` & `Target` platform validation, atomic JSON persistence, sorting, multi-column keyword search, column width & order persistence), the full **PyQt6 GUI**, an automatic `icon.ico` generator, a built-in PyInstaller `.exe` builder (`--build-exe`), and a 13-test `unittest` suite (`--test`) live inside one standalone file: **`github_release_tracker.py`**.
 - **Self-Contained Directory Storage**: You can drop `github_release_tracker.py` into any folder on your computer or USB drive and run it. It automatically creates and updates its runtime files (`projects.json`, atomic `projects.json.tmp`, `projects.json.bak`, and `icon.ico`) right next to `github_release_tracker.py` in its own directory (falling back to `%APPDATA%\GitHubReleaseTracker` only if the folder is read-only).
 
 ## Features
 
+- **Top Multi-Column Search (`Ctrl+F`)**: Type any keyword (or multiple keywords) into the **🔍 Search** box at the top right to instantly filter the list across all 10 columns (**Title**, **Project**, **Repository**, **Source**, **Target**, **Current release**, **Published**, **Status**, **Last checked**, and **Comment**), with a live `matched / total` counter and 1-click clear button
 - **Multi-Site Release Tracking**: Add a project by pasting:
   - A GitHub URL or `owner/repo` (e.g. `https://github.com/Ryubing/Ryujinx` or `Ryubing/Ryujinx`)
   - A Forgejo / Gitea / Codeberg repository URL (e.g. `https://git.magicbean.dev/MagicBeanDev/Longshot`)
@@ -50,7 +51,7 @@ python github_release_tracker.py
 | Command | Description |
 |---|---|
 | `python github_release_tracker.py` | Launch the PyQt6 desktop GUI (creates `projects.json` & `icon.ico` next to `github_release_tracker.py`) |
-| `python github_release_tracker.py --test` | Run the built-in 12-test `unittest` suite |
+| `python github_release_tracker.py --test` | Run the built-in 13-test `unittest` suite |
 | `python github_release_tracker.py --build-exe` | Build a standalone `dist/GitHubReleaseTracker.exe` next to `github_release_tracker.py` using PyInstaller |
 
 ## Build a Standalone `.exe` (PyInstaller EXE Builder)

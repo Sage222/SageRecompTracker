@@ -732,6 +732,46 @@ export function sortOrder(projects: Project[], col: string, asc: boolean): numbe
   return idx;
 }
 
+export function projectColumnTexts(p: Project): string[] {
+  return [
+    p.user_title || '',
+    displayName(p),
+    repoDisplayLabel(p),
+    p.source || 'PC',
+    p.target || 'PC',
+    releaseLabel(p),
+    publishedLabel(p),
+    statusText(p),
+    checkedLabel(p),
+    p.comment || '',
+  ];
+}
+
+export function projectMatchesSearch(p: Project, query: string): boolean {
+  const q = (query || '').trim().toLowerCase();
+  if (!q) return true;
+  const parts = [
+    ...projectColumnTexts(p),
+    p.title || '',
+    p.custom_name || '',
+    `${p.owner}/${p.repo}`,
+    p.html_url || '',
+    p.latest?.tag || '',
+    p.latest?.name || '',
+  ];
+  const haystack = parts.join('\n').toLowerCase();
+  const tokens = q.split(/\s+/).filter(Boolean);
+  return tokens.every((tok) => haystack.includes(tok));
+}
+
+export function filterIndices(projects: Project[], indices: number[], query: string): number[] {
+  if (!query || !query.trim()) return [...indices];
+  return indices.filter((ix) => {
+    const p = projects[ix];
+    return Boolean(p) && projectMatchesSearch(p, query);
+  });
+}
+
 export function layoutColumns(base: number[], low: number[], avail: number): number[] {
   const totalPref = base.reduce((a, b) => a + b, 0);
   const totalLow = low.reduce((a, b) => a + b, 0);
